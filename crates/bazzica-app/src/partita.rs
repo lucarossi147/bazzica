@@ -53,7 +53,6 @@ pub fn Partita(vista: Vista) -> Element {
             } else if st.fase == Fase::FineMano {
                 FineMano { vista: vista.clone() }
             }
-            Menu { finita }
         }
     }
 }
@@ -130,14 +129,13 @@ fn Centro(vista: Vista, obs: Osservazione) -> Element {
             }
         }
         div { class: "dettagli",
-            span { "Mazzo: {obs.carte_nel_mazzo}" }
+            span { "Mazzo {obs.carte_nel_mazzo} · Prese " }
             for sq in 0..2usize {
+                if sq == 1 { span { "–" } }
                 span { class: "sq{sq}",
-                    "Prese {vista.tavolo.impostazioni.squadre[sq]}: {obs.prese[sq].n}"
-                    if !obs.prese[sq].scoperte.is_empty() {
-                        " · scope {obs.prese[sq].scoperte.len()}"
-                    }
-                    if obs.credito[sq] > 0 { " · credito {obs.credito[sq]}" }
+                    "{obs.prese[sq].n}"
+                    if !obs.prese[sq].scoperte.is_empty() { " ({obs.prese[sq].scoperte.len()} sc.)" }
+                    if obs.credito[sq] > 0 { " +{obs.credito[sq]} cred." }
                 }
             }
         }
@@ -464,27 +462,24 @@ fn Fine(vista: Vista) -> Element {
 }
 
 #[component]
-fn Menu(finita: bool) -> Element {
+pub fn Menu() -> Element {
     let ctx = use_context::<Ctx>();
     let mut conferma = use_signal(|| false);
-    if finita {
-        return rsx! {};
-    }
     rsx! {
         div { class: "menu-partita",
             if conferma() {
-                span { "Interrompere la partita per tutti?" }
+                span { "Interrompere per tutti?" }
                 button {
                     class: "piccolo pericolo",
                     onclick: move |_| {
                         conferma.set(false);
                         ctx.richiedi(Richiesta::Termina);
                     },
-                    "Sì, interrompi"
+                    "Sì"
                 }
                 button { class: "piccolo secondario", onclick: move |_| conferma.set(false), "No" }
             } else {
-                button { class: "piccolo secondario", onclick: move |_| conferma.set(true), "Interrompi partita" }
+                button { class: "piccolo secondario", onclick: move |_| conferma.set(true), "Interrompi" }
             }
         }
     }

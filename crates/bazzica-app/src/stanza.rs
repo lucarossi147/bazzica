@@ -11,9 +11,11 @@ use crate::{Ctx, Vista, link_tavolo, partita};
 #[component]
 pub fn Tavolo(vista: Vista) -> Element {
     let in_gioco = vista.tavolo.partita.is_some() && vista.tavolo.stato != StatoTavolo::Lobby;
+    let finita = vista.tavolo.stato == StatoTavolo::Finita;
     rsx! {
-        div { class: "schermo",
-            Intestazione { vista: vista.clone() }
+        // in game the screen is exactly one viewport tall: the hand never falls off the bottom
+        div { class: if in_gioco { "schermo gioco" } else { "schermo" },
+            Intestazione { vista: vista.clone(), menu: in_gioco && !finita }
             if in_gioco {
                 partita::Partita { vista }
             } else {
@@ -24,7 +26,7 @@ pub fn Tavolo(vista: Vista) -> Element {
 }
 
 #[component]
-fn Intestazione(vista: Vista) -> Element {
+fn Intestazione(vista: Vista, menu: bool) -> Element {
     let ctx = use_context::<Ctx>();
     let mut qr = use_signal(|| false);
     let codice = ctx
@@ -58,6 +60,9 @@ fn Intestazione(vista: Vista) -> Element {
                     "Link"
                 }
                 button { class: "piccolo", onclick: move |_| qr.toggle(), "QR" }
+                if menu {
+                    partita::Menu {}
+                }
                 button { class: "piccolo secondario", onclick: move |_| ctx.esci(), "Esci" }
             }
         }
