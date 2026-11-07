@@ -215,3 +215,9 @@ summary { cursor: pointer; color: var(--muted); }
 .impostazioni h3 { margin: 14px 0 6px; }
 .impostazioni h3:first-child { margin-top: 0; }
 .finestra .menu-partita { color: var(--ink); justify-content: flex-start; }
+
+/* quick phrases and striscia */
+.chiacchiere { display: flex; gap: 6px; justify-content: center; }
+button.chiacchiera { background: rgba(255,255,255,.12); color: var(--cream); font-size: 13px; padding: 4px 10px; }
+.frasi { position: fixed; left: 8px; right: 8px; bottom: calc(var(--cw) * 1.67 + 24px + env(safe-area-inset-bottom)); margin: 0 auto; max-width: 460px; display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; background: var(--panel); border-radius: 12px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.45); z-index: 20; }
+.frasi button { background: var(--felt); }

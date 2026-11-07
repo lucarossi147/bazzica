@@ -93,6 +93,31 @@ impl Ctx {
         self.gestisci(&c, uscite);
     }
 
+    /// A quick phrase or a card drag (cosmetic, sent straight to everyone), rate-limited.
+    pub fn effimero(&self, e: Effimero) {
+        thread_local! {
+            static ULTIMO: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
+        }
+        let (i, pausa) = match e {
+            Effimero::Frase { .. } => (0, 3000),
+            Effimero::Striscia { .. } => (1, 1000),
+        };
+        let adesso = ora();
+        let mut ultimo = ULTIMO.get();
+        if adesso < ultimo[i] + pausa {
+            return;
+        }
+        ultimo[i] = adesso;
+        ULTIMO.set(ultimo);
+        let Some(c) = self.conn.peek().clone() else {
+            return;
+        };
+        match c.effimero(e) {
+            Ok(uscite) => self.gestisci(&c, uscite),
+            Err(err) => self.avvisa(err.0),
+        }
+    }
+
     pub fn avvisa(&self, testo: impl Into<String>) {
         let mut a = self.avviso;
         a.set(Some((testo.into(), ora())));

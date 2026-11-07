@@ -3,7 +3,8 @@
 use bazzica_core::game::Osservazione;
 use bazzica_core::scoring::Riepilogo;
 use bazzica_core::{Azione, Card, Fase, GameState, Seat, Vincitore};
-use bazzica_net::{Posto, Richiesta, StatoTavolo};
+use bazzica_net::tavolo::FRASI;
+use bazzica_net::{Effimero, Posto, Richiesta, StatoTavolo};
 use dioxus::prelude::*;
 
 use crate::carte::{Carta, Dorso};
@@ -259,6 +260,7 @@ fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
                     button { class: "secondario", onclick: move |_| scelta.set(None), "Annulla" }
                 }
             }
+            Chiacchiere { st: st.clone(), seat }
             div { class: "carte-mano", "data-seat": "{seat}",
                 for c in mano {
                     Carta {
@@ -278,6 +280,45 @@ fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
                                 }
                             }))
                         },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Quick phrases and the "striscia" (allowed communication, cosmetic only).
+#[component]
+fn Chiacchiere(st: GameState, seat: Seat) -> Element {
+    let ctx = use_context::<Ctx>();
+    let mut aperto = use_signal(|| false);
+    if st.fase != Fase::Gioco {
+        return rsx! {};
+    }
+    let precedente = (seat + 3) % 4;
+    let puo_strisciare = st.corrente == precedente;
+    rsx! {
+        div { class: "chiacchiere",
+            button { class: "piccolo chiacchiera", onclick: move |_| aperto.toggle(), "💬" }
+            if puo_strisciare {
+                button {
+                    class: "piccolo chiacchiera",
+                    title: "Metti fretta al giocatore prima di te",
+                    onclick: move |_| ctx.effimero(Effimero::Striscia { seat, verso: precedente }),
+                    "Striscia"
+                }
+            }
+        }
+        if aperto() {
+            div { class: "frasi",
+                for (i, f) in FRASI.iter().enumerate() {
+                    button {
+                        class: "piccolo",
+                        onclick: move |_| {
+                            aperto.set(false);
+                            ctx.effimero(Effimero::Frase { seat, indice: i as u8 });
+                        },
+                        "{f}"
                     }
                 }
             }

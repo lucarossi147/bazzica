@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use bazzica_net::{Config, Impostazioni, Nodo, Richiesta, Uscita};
+use bazzica_net::{Config, Effimero, Errore, Impostazioni, Nodo, Richiesta, Uscita};
 use bazzica_rete::matchbox::PeerId;
 use bazzica_rete::nostr::casuale;
 use bazzica_rete::{NostrSignallerBuilder, Sessione};
@@ -82,5 +82,9 @@ impl Connessione {
 
     pub fn richiedi(&self, r: Richiesta) -> Vec<Uscita<PeerId>> {
         self.sessione.borrow_mut().richiedi(ora(), r)
+    }
+
+    pub fn effimero(&self, e: Effimero) -> Result<Vec<Uscita<PeerId>>, Errore> {
+        self.sessione.borrow_mut().effimero(ora(), e)
     }
 }
