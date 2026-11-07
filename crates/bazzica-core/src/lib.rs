@@ -5,6 +5,7 @@
 //! checked against the recorded games in `testdata/tracce`.
 
 pub mod bazzica;
+pub mod bots;
 pub mod cards;
 pub mod game;
 pub mod prng;
