@@ -6,7 +6,7 @@ geometriche (cerchi, ellissi, curve di Bezier): nessuna immagine esistente e'
 copiata o ricalcata, quindi l'output e' rilasciabile con la stessa licenza
 MIT del progetto.
 
-Uso:  py tools/genera_carte.py   (scrive in assets/carte/)
+Uso:  py tools/genera_carte.py   (scrive in crates/bazzica-app/public/carte/)
 
 Lo script usa solo la libreria standard ed e' deterministico.
 """
@@ -666,7 +666,7 @@ def anteprima() -> str:
 
 def main() -> int:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    out = os.path.join(root, "assets", "carte")
+    out = os.path.join(root, "crates", "bazzica-app", "public", "carte")
     os.makedirs(out, exist_ok=True)
     total = 0
     files = {}

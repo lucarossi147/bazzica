@@ -1,0 +1,16 @@
+[package]
+name = "bazzica-app"
+description = "Bazzica web app (Dioxus, runs in the browser as a PWA)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+bazzica-core = { path = "../bazzica-core" }
+bazzica-net = { path = "../bazzica-net" }
+dioxus = { version = "=0.7.9", features = ["web"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bazzica-rete = { path = "../bazzica-rete" }

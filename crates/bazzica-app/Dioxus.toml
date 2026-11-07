@@ -1,0 +1,7 @@
+[application]
+name = "bazzica"
+out_dir = "dist"
+
+[web.app]
+title = "Bazzica"
+base_path = "bazzica"

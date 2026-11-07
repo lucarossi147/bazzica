@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bazzica-core", "crates/bazzica-net", "crates/bazzica-rete"]
+members = ["crates/bazzica-core", "crates/bazzica-net", "crates/bazzica-rete", "crates/bazzica-app"]
 
 [workspace.package]
 edition = "2024"

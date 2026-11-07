@@ -34,3 +34,6 @@ assets/cards/Carte_piacentine_al_completo.png
 
 # --- Rust ---
 /target/
+
+# --- Web app build output ---
+/crates/bazzica-app/dist/
