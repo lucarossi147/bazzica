@@ -2,7 +2,7 @@
 
 Usato per il primo mazziere, i mescolamenti e gli spareggi dei bot, così che una
 partita sia riproducibile dal solo seed in entrambi i linguaggi. L'implementazione
-Dart (``mobile/packages/bazzica_core/lib/engine/prng.dart``) deve restare identica:
+Rust (``crates/bazzica-core/src/prng.rs``) deve restare identica:
 ogni operazione è su interi a 32 bit senza segno.
 """
 from __future__ import annotations

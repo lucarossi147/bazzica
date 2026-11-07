@@ -36,7 +36,7 @@ from bazzica.engine import (  # noqa: E402
 )
 
 VERSIONE_FORMATO = 1
-USCITA_DEFAULT = os.path.join(ROOT, "mobile", "packages", "bazzica_core", "test", "tracce")
+USCITA_DEFAULT = os.path.join(ROOT, "testdata", "tracce")
 
 
 # --------------------------------------------------------------------------- serializzazione
