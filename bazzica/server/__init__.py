@@ -1,1 +1,0 @@
-"""Server FastAPI della Bazzica."""

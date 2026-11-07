@@ -17,24 +17,8 @@ htmlcov/
 Thumbs.db
 desktop.ini
 
-# --- Dati generati a runtime dal server ---
-logs/
-data/*.db
-data/*.db-journal
-data/*.db-wal
-data/*.db-shm
-
-# --- Materiale di lavoro non usato dal gioco ---
-# WAV di prova generati durante lo sviluppo
-Claude outputs/
-# Originali dei suoni prima della normalizzazione (il gioco usa quelli in assets/sounds/)
-assets/sounds/originali/
-# Foglio sorgente con tutte le carte (13 MB), già ritagliato nei singoli PNG
-assets/cards/Carte_piacentine_al_completo.png
-
 # --- Rust ---
 /target/
 
 # --- Web app build output ---
 /crates/bazzica-app/dist/
-/.venv/
