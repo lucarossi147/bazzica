@@ -1,77 +1,68 @@
-# Bazzica — istruzioni di avvio
+# Bazzica — istruzioni
 
-## Requisiti
-- Python 3.11 o successivo
-- Le immagini delle carte in `assets/cards/` (nomi `{seme}_{valore:02d}.png` più `dorso.png`; se i nomi sono diversi, crea `assets/cards/mapping.json` del tipo `{"denari_07": "mio_file.png", ...}`). Le carte mancanti vengono disegnate in CSS.
+Si gioca dal browser: **https://lucarossi147.github.io/bazzica/**
 
-## Installazione (una volta sola)
-Apri un terminale nella cartella del progetto:
-```
-python -m pip install -r requirements.txt
-```
+Non c'è un server di gioco. Ogni telefono o PC esegue il motore delle regole e i giocatori
+si collegano direttamente tra loro (WebRTC). Per trovarsi usano dei relay pubblici Nostr,
+che vedono passare solo messaggi cifrati con il codice del tavolo.
 
-## Avvio
-```
-python run.py
-```
-(porta diversa: `python run.py --port 9000`)
+## Giocare
+1. Apri la pagina, scrivi il tuo nome e scegli avatar e carte (Disegnate o Piacentine).
+2. **Crea un tavolo** e manda agli amici il link o il QR (pulsante ⚙), oppure
+   scrivi il codice di 8 lettere di un tavolo esistente ed **Entra**.
+3. Sedetevi ai posti; quelli vuoti si possono riempire con dei bot. Chi ha creato il tavolo
+   può liberare i posti degli altri. Le regole (variante, Margherita Hack, timer, nomi delle
+   squadre) si scelgono nella stanza.
+4. **Inizia la partita** quando tutti e 4 i posti sono occupati.
 
-La console mostra gli indirizzi da aprire, per esempio:
-```
- Su questo PC:      http://localhost:8000
- In rete locale:    http://192.168.1.23:8000
-```
-
-## Giocare in rete locale (LAN)
-1. Avvia il server su un PC (l'host).
-2. **Firewall:** la prima volta Windows chiede se consentire Python sulle reti private: rispondi *Consenti*. In alternativa, apri la porta TCP 8000 in *Windows Defender Firewall → Regole connessioni in entrata* per le reti private.
-3. Ogni giocatore apre nel browser l'indirizzo "In rete locale" (anche da tablet), inserisce il nome, apre il tavolo dalla lobby e si siede su un posto libero.
-4. Chi ha creato il tavolo sceglie variante e Margherita Hack, mette i bot sui posti vuoti e preme **Avvia partita**.
-
-Squadre: Nord e Sud contro Est e Ovest. Nella stanza del tavolo si possono scegliere i nomi delle squadre (altrimenti "Squadra 1" e "Squadra 2") e la durata dei timer (scambio e singola carta, oppure "Nessuno"). Il primo mazziere è sorteggiato.
-
-All'ingresso ognuno sceglie nome e avatar (12 disponibili); i bot hanno l'avatar del robot.
-
-## Giocare sullo stesso PC (hot-seat)
-Dallo stesso browser siediti su più posti: dal secondo in poi si apre una finestra per il nome e l'avatar del nuovo giocatore. Durante la partita, quando tocca a un altro giocatore umano compare la schermata **"Passa a …"**: passa il dispositivo e tocca per mostrare le carte. Anche lo scambio segreto della variante Heisenberg resta segreto.
+Su iPhone: Condividi → *Aggiungi alla schermata Home* per averla come app a tutto schermo.
+I suoni partono dopo il primo tocco sulla pagina.
 
 ## Durante la partita
-- Tocca una carta: compaiono le prese possibili con l'anteprima (Scopa, Piccola, Grande, assi, credito); tocca l'opzione per giocare.
-- **Bazzica!** apre la scelta delle Bazziche valide (con il valore del 7 bello).
-- Il pulsante tondo 💬 **Chat** (in basso a destra) apre "Che Palo!" e tutte le frasi (una esclamazione ogni 3 secondi al massimo).
-- **Pre-mossa**: mentre giocano gli altri puoi già toccare la carta che vuoi giocare (diventa "pronta"); quando tocca a te compaiono subito le sue prese e basta premere il pulsante.
-- **Striscia** (pulsante azzurro 🃏): si può premere solo mentre gioca il giocatore che viene prima di te; fa comparire vicino a lui una carta strisciata sul tavolo, per mettergli fretta.
-- **Timer** (durate scelte nella stanza, predefinite 30 s e 15 s): allo scadere dello scambio chi non ha passato passa una carta a caso; allo scadere del tempo per una carta gioca il computer al posto tuo. In pausa per disconnessione il timer si ferma e riparte da capo.
-- **Partita tra soli bot**: metti 4 bot e premi "Avvia partita" (oppure "👀 Guarda" nella lobby): la partita si guarda a ritmo umano, con tutte le carte scoperte. I bot aspettano che le animazioni siano finite prima di giocare.
-- La **chat** (pulsante "Chat", con "Che Palo!" e le frasi) si apre solo quando lo scambio delle carte è finito.
-- Dal menu ☰ qualsiasi giocatore seduto può **terminare la partita** (conferma dentro il gioco): tutti vedono "Partita interrotta" e possono tornare al tavolo.
-- Il pulsante 👀 **Ultima presa** (in alto a sinistra) mostra chi ha fatto l'ultima presa della Mano e con quali carte.
-- Nello scambio: scegli una delle tue carte, poi **Passa** o **Passa veloce**. La carta del compagno si vede solo quando avete passato entrambi; di lui sai solo se ha già passato e se ha passato veloce.
-- A fine Mano compare il riepilogo; la Mano successiva parte quando tutti hanno premuto **Continua**.
-- Se un giocatore si disconnette la partita va in pausa finché non riapre la pagina dallo stesso browser (la sessione è ricordata).
-- Il pulsante con l'altoparlante attiva/disattiva i suoni; i file opzionali vanno in `assets/sounds/` (vedi `LEGGIMI.txt`).
+- Tocca una carta: compaiono le prese possibili; tocca l'opzione per giocare.
+- **Bazzica!** e **Che palo!** compaiono quando sono possibili.
+- 💬 apre le frasi veloci (una ogni 3 secondi al massimo).
+- **Striscia**: trascina una carta per mettere fretta al giocatore prima di te.
+- Il pulsante ⚙ contiene invito (link e QR), scelta delle carte, suoni e **Interrompi**.
+- Se un giocatore seduto si scollega la partita va in pausa finché non riapre il link dallo
+  stesso browser (nome e identità sono ricordati sul dispositivo).
+- Se chi fa da "regia" (il tavolo che ordina le mosse) esce, un altro giocatore collegato
+  prende il suo posto senza interrompere la partita.
 
-## Log e storico
-- Un log di debug per partita in `logs/` (contiene anche le mani di tutti: non mostrarlo ai giocatori!).
-- Lo storico (SQLite) è in `data/storico.db`; si consulta dalla pagina **Storico** della lobby.
+## Sviluppo
 
-## Opzioni
-- Ritardo dei bot: variabile d'ambiente `BAZZICA_RITARDO_BOT`, es. `set BAZZICA_RITARDO_BOT=0.3-0.6` (Windows) prima di `python run.py`. Default `0.8-1.5` secondi.
+### Struttura
+```
+crates/bazzica-core/   regole, punteggio e bot (Rust), verificati sulle tracce
+crates/bazzica-net/    protocollo del tavolo, senza rete: log ordinato, elezione della regia
+crates/bazzica-rete/   trasporto: WebRTC (matchbox) con segnalazione su Nostr
+crates/bazzica-app/    app web (Dioxus → WASM), effetti e suoni in public/fx/
+bazzica/               motore di riferimento in Python (regole e bot)
+testdata/tracce/       partite registrate dal motore Python: l'oracolo per quello Rust
+tools/                 generazione delle carte, export/verifica tracce, test end-to-end
+```
 
-## Test
+### Comandi
 ```
-python -m pytest
-```
-La simulazione solo-bot gioca 2.000 partite (250 per variante); per una prova veloce: `set BAZZICA_SIM=10`.
+cargo test --workspace                     # motore, protocollo, trasporto
+cargo test -p bazzica-rete -- --ignored    # partita dal vivo tra 4 peer sui relay veri
+python -m pytest                           # motore Python (BAZZICA_SIM=10 per fare prima)
+python tools/verifica_tracce.py            # il motore Python riproduce le tracce
+python tools/esporta_tracce.py             # rigenera le tracce
 
-## Struttura
+cd crates/bazzica-app
+dx bundle --platform web --release         # (dioxus-cli 0.7.9) → dist/public
 ```
-bazzica/engine/   regole pure (stato, azioni legali, punteggio)
-bazzica/bots/     interfaccia Agent e bot euristico (base per futuri bot LLM)
-bazzica/server/   FastAPI, lobby, WebSocket, log, storico
-bazzica/web/      interfaccia (HTML/CSS/JS senza build)
-tests/            test pytest
-```
+Per provare in locale servi `dist/public` sotto `/bazzica/` (per esempio copiandolo in
+`sito/bazzica` e lanciando `python -m http.server 8080` da `sito`). Per avere più giocatori
+nello stesso browser aggiungi `?profilo=a`, `?profilo=b`, … all'indirizzo: ogni profilo ha
+un'identità separata. `localStorage["bazzica.debug"] = 1` attiva i log dettagliati.
+
+`tools/prova_web.py` gioca una partita completa tra due browser (Playwright con Edge).
+
+### Pubblicazione
+Ogni push su `main` esegue la CI (fmt, clippy, test Rust e Python) e pubblica l'app su
+GitHub Pages (`.github/workflows/pages.yml`).
 
 ## Scelte di regolamento concordate
 - Il 7 bello a cui si assegna 1 non piglia mai tutto (vale 1).

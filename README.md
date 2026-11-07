@@ -1,6 +1,8 @@
 # Bazzica
 Il gioco della Bazzica è una variante del gioco della Scopa, cui si aggiunge il meccanismo della Bazzica, ossia un modo per segnare Scope aggiuntive sulla base delle carte che un giocatore possiede all'inizio di ogni turno.
 
+**Gioca:** https://lucarossi147.github.io/bazzica/ — dal browser di telefono o PC, senza installare nulla e senza server: i giocatori si collegano direttamente tra loro. Come si gioca, come è fatto il progetto e come svilupparlo: [ISTRUZIONI.md](ISTRUZIONI.md).
+
 # Regole della Bazzica Vanilla
 
 ## Il mazzo
