@@ -1,0 +1,36 @@
+[package]
+name = "bazzica-rete"
+description = "WebRTC transport for Bazzica tables, with signaling over public Nostr relays"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bazzica-net = { path = "../bazzica-net" }
+matchbox_socket = "0.15"
+k256 = { version = "0.14", default-features = false, features = ["schnorr", "alloc"] }
+chacha20poly1305 = "0.11"
+getrandom = "0.4"
+base64 = "0.23"
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures = "0.3"
+uuid = "1"
+sync_wrapper = "1"
+futures-timer = "3"
+log = "0.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+async-tungstenite = { version = "0.35", default-features = false, features = ["smol-runtime", "futures-rustls-webpki-roots", "futures-03-sink"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ws_stream_wasm = "0.7"
+js-sys = "0.3"
+getrandom = { version = "0.4", features = ["wasm_js"] }
+futures-timer = { version = "3", features = ["wasm-bindgen"] }
+
+[dev-dependencies]
+bazzica-core = { path = "../bazzica-core" }
+smol = "2"
