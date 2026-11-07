@@ -518,7 +518,8 @@ fn rimuovi(v: &mut Vec<Card>, c: Card) {
 }
 
 impl GameState {
-    fn vuoto(regole: RulesConfig, seed: u64, rng: Mulberry32) -> GameState {
+    /// A blank state with no cards dealt (for tools and tests that set up positions).
+    pub fn vuoto(regole: RulesConfig, seed: u64, rng: Mulberry32) -> GameState {
         GameState {
             regole,
             seed,
@@ -1093,7 +1094,8 @@ impl GameState {
         events
     }
 
-    fn controlla_fine(&self) -> Option<Vincitore> {
+    /// Winner if the game is over given the current scores and hand count.
+    pub fn controlla_fine(&self) -> Option<Vincitore> {
         let [a, b] = self.punteggi;
         if self.regole.margherita_hack {
             if self.mano_n < 4 {
