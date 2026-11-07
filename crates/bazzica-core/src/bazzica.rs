@@ -42,12 +42,23 @@ impl OpzioneBazzica {
 }
 
 /// Best Bazzica for three values; `con_sette_bello` matters for Einstein (triple = 5).
-pub fn valuta_valori(valori: &[u8], rules: &RulesConfig, con_sette_bello: bool) -> Option<(TipoBazzica, u32)> {
+pub fn valuta_valori(
+    valori: &[u8],
+    rules: &RulesConfig,
+    con_sette_bello: bool,
+) -> Option<(TipoBazzica, u32)> {
     let [a, b, c] = *valori else { return None };
     let somma = a + b + c;
     let distinti = 1 + u8::from(b != a) + u8::from(c != a && c != b);
     match distinti {
-        1 => Some((TipoBazzica::Tris, if rules.einstein && con_sette_bello { 5 } else { 7 })),
+        1 => Some((
+            TipoBazzica::Tris,
+            if rules.einstein && con_sette_bello {
+                5
+            } else {
+                7
+            },
+        )),
         2 if somma <= 9 => Some((TipoBazzica::Coppia, 3)),
         3 if somma <= 9 => Some((TipoBazzica::Diverse, 2)),
         _ => None,
@@ -55,7 +66,9 @@ pub fn valuta_valori(valori: &[u8], rules: &RulesConfig, con_sette_bello: bool) 
 }
 
 fn valori_con_sette(mano: &[Card], v: u8) -> Vec<u8> {
-    mano.iter().map(|&c| if c == SETTE_BELLO { v } else { c.val() }).collect()
+    mano.iter()
+        .map(|&c| if c == SETTE_BELLO { v } else { c.val() })
+        .collect()
 }
 
 /// Bazziche callable with a 3-card hand; with the 7 bello, one option per value 1..=10
@@ -67,14 +80,23 @@ pub fn opzioni_bazzica(mano: &[Card], rules: &RulesConfig) -> Vec<OpzioneBazzica
     if mano.contains(&SETTE_BELLO) {
         (1..=10)
             .filter_map(|v| {
-                valuta_valori(&valori_con_sette(mano, v), rules, true)
-                    .map(|(tipo, scope)| OpzioneBazzica { sette: Some(v), tipo, scope })
+                valuta_valori(&valori_con_sette(mano, v), rules, true).map(|(tipo, scope)| {
+                    OpzioneBazzica {
+                        sette: Some(v),
+                        tipo,
+                        scope,
+                    }
+                })
             })
             .collect()
     } else {
         let valori: Vec<u8> = mano.iter().map(|c| c.val()).collect();
         valuta_valori(&valori, rules, false)
-            .map(|(tipo, scope)| OpzioneBazzica { sette: None, tipo, scope })
+            .map(|(tipo, scope)| OpzioneBazzica {
+                sette: None,
+                tipo,
+                scope,
+            })
             .into_iter()
             .collect()
     }
@@ -86,7 +108,12 @@ pub fn puo_dire_che_palo(mano: &[Card], rules: &RulesConfig) -> bool {
         return false;
     }
     (0..3).any(|i| {
-        let resto: Vec<Card> = mano.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, c)| *c).collect();
+        let resto: Vec<Card> = mano
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, c)| *c)
+            .collect();
         let ha_sette = resto.contains(&SETTE_BELLO);
         (1..=10).any(|w| {
             if ha_sette {
@@ -117,12 +144,24 @@ mod tests {
     #[test]
     fn kinds() {
         let r = RulesConfig::default();
-        assert_eq!(valuta_valori(&[5, 5, 5], &r, false), Some((TipoBazzica::Tris, 7)));
-        assert_eq!(valuta_valori(&[2, 2, 5], &r, false), Some((TipoBazzica::Coppia, 3)));
-        assert_eq!(valuta_valori(&[1, 3, 5], &r, false), Some((TipoBazzica::Diverse, 2)));
+        assert_eq!(
+            valuta_valori(&[5, 5, 5], &r, false),
+            Some((TipoBazzica::Tris, 7))
+        );
+        assert_eq!(
+            valuta_valori(&[2, 2, 5], &r, false),
+            Some((TipoBazzica::Coppia, 3))
+        );
+        assert_eq!(
+            valuta_valori(&[1, 3, 5], &r, false),
+            Some((TipoBazzica::Diverse, 2))
+        );
         assert_eq!(valuta_valori(&[2, 3, 5], &r, false), None);
         let e = RulesConfig::preset(Variante::Einstein, false);
-        assert_eq!(valuta_valori(&[5, 5, 5], &e, true), Some((TipoBazzica::Tris, 5)));
+        assert_eq!(
+            valuta_valori(&[5, 5, 5], &e, true),
+            Some((TipoBazzica::Tris, 5))
+        );
     }
 
     #[test]
@@ -132,7 +171,13 @@ mod tests {
         // 7 bello as 1 or 3 -> pair; as 2,4,5 -> three different values with sum <= 9
         let settes: Vec<_> = ops.iter().map(|o| o.sette.unwrap()).collect();
         assert_eq!(settes, [1, 2, 3, 4, 5]);
-        assert_eq!(ops[0].descrizione(), "Coppia con somma ≤ 9 — 3 Scope (7 bello = 1)");
-        assert!(puo_dire_che_palo(&[c(Coppe, 5), c(Spade, 5), c(Bastoni, 6)], &r));
+        assert_eq!(
+            ops[0].descrizione(),
+            "Coppia con somma ≤ 9 — 3 Scope (7 bello = 1)"
+        );
+        assert!(puo_dire_che_palo(
+            &[c(Coppe, 5), c(Spade, 5), c(Bastoni, 6)],
+            &r
+        ));
     }
 }

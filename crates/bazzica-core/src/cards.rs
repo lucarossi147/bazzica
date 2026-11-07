@@ -95,7 +95,11 @@ impl Card {
         match self {
             SETTE_BELLO => "Sette bello".to_owned(),
             RE_BELLO => "Re bello".to_owned(),
-            _ => format!("{} di {}", NOMI_VALORE[usize::from(self.val() - 1)], self.seme().nome()),
+            _ => format!(
+                "{} di {}",
+                NOMI_VALORE[usize::from(self.val() - 1)],
+                self.seme().nome()
+            ),
         }
     }
 }
@@ -105,7 +109,11 @@ pub fn nomi(cards: &[Card]) -> String {
     if cards.is_empty() {
         return "nessuna".to_owned();
     }
-    cards.iter().map(|c| c.nome()).collect::<Vec<_>>().join(", ")
+    cards
+        .iter()
+        .map(|c| c.nome())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl fmt::Display for Card {

@@ -59,7 +59,10 @@ mod tests {
     fn reference_vectors() {
         let mut r = Mulberry32::new(1);
         let got: Vec<u32> = (0..5).map(|_| r.next_u32()).collect();
-        assert_eq!(got, [2693262067, 11749833, 2265367787, 4213581821, 4159151403]);
+        assert_eq!(
+            got,
+            [2693262067, 11749833, 2265367787, 4213581821, 4159151403]
+        );
         let mut r = Mulberry32::new(0xDEAD_BEEF);
         let got: Vec<u32> = (0..3).map(|_| r.next_u32()).collect();
         assert_eq!(got, [4043151706, 1147597007, 3315858022]);

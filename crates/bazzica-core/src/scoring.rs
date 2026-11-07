@@ -78,18 +78,34 @@ pub fn primiera(carte: &[Card]) -> (u32, PrimieraDettaglio, Vec<Seme>) {
             }
         }
         match best {
-            Some(c) => migliori[i] = Some(MigliorePrimiera { carta: c, punti: punti_primiera(c) }),
+            Some(c) => {
+                migliori[i] = Some(MigliorePrimiera {
+                    carta: c,
+                    punti: punti_primiera(c),
+                })
+            }
             None => mancanti.push(s),
         }
     }
     let tot = migliori.iter().flatten().map(|m| m.punti).sum();
     let [denari, coppe, spade, bastoni] = migliori;
-    (tot, PrimieraDettaglio { denari, coppe, spade, bastoni }, mancanti)
+    (
+        tot,
+        PrimieraDettaglio {
+            denari,
+            coppe,
+            spade,
+            bastoni,
+        },
+        mancanti,
+    )
 }
 
 /// Length of the denari run starting from the ace (0 if shorter than A-2-3).
 pub fn napola(carte: &[Card]) -> u32 {
-    let n = (1..=10).take_while(|&v| carte.contains(&Card::new(Seme::Denari, v))).count() as u32;
+    let n = (1..=10)
+        .take_while(|&v| carte.contains(&Card::new(Seme::Denari, v)))
+        .count() as u32;
     if n >= 3 { n } else { 0 }
 }
 
@@ -217,7 +233,11 @@ pub fn riepilogo_mano(prese: &[Vec<Entrata>; 2], rules: &RulesConfig) -> Riepilo
     for (d, p) in sq.iter_mut().zip(punti) {
         d.punti_mazzo = p.totale();
         d.punti_mazzo_dettaglio = p;
-        d.punti_due_denari = if d.due_denari { -5 + if rules.fermi { d.punti_mazzo } else { 0 } } else { 0 };
+        d.punti_due_denari = if d.due_denari {
+            -5 + if rules.fermi { d.punti_mazzo } else { 0 }
+        } else {
+            0
+        };
         if rules.federico && d.napola_len >= 3 {
             d.napola = d.napola_len;
             d.napola_nome = Some(if d.napola_len == 10 {
@@ -232,7 +252,14 @@ pub fn riepilogo_mano(prese: &[Vec<Entrata>; 2], rules: &RulesConfig) -> Riepilo
         d.totale = d.punti_mazzo + d.scope as i32 + d.punti_due_denari + d.napola as i32;
     }
     let totali = [sq[0].totale, sq[1].totale];
-    Riepilogo { squadre: sq, totali, mano: 0, mazziere: 0, credito_perso: [0, 0], punteggi: [0, 0] }
+    Riepilogo {
+        squadre: sq,
+        totali,
+        mano: 0,
+        mazziere: 0,
+        credito_perso: [0, 0],
+        punteggi: [0, 0],
+    }
 }
 
 #[cfg(test)]
@@ -241,10 +268,17 @@ mod tests {
 
     #[test]
     fn primiera_and_napola() {
-        let carte: Vec<Card> = ["denari_01", "denari_02", "denari_03", "denari_05", "coppe_07", "coppe_06"]
-            .iter()
-            .map(|s| Card::from_codice(s).unwrap())
-            .collect();
+        let carte: Vec<Card> = [
+            "denari_01",
+            "denari_02",
+            "denari_03",
+            "denari_05",
+            "coppe_07",
+            "coppe_06",
+        ]
+        .iter()
+        .map(|s| Card::from_codice(s).unwrap())
+        .collect();
         let (pt, det, manc) = primiera(&carte);
         assert_eq!(pt, 16 + 21);
         assert_eq!(det.denari.unwrap().carta.codice(), "denari_01");

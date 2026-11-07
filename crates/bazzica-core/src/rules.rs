@@ -121,7 +121,12 @@ mod tests {
         assert!(f.scambio && f.einstein && f.fermi && !f.pascal && f.margherita_hack);
         assert_eq!(f.descrizione(), "Fermi + Margherita Hack");
         let a = RulesConfig::preset(Variante::Avogadro, false);
-        assert!(a.scambio && a.einstein && a.fermi && a.pascal && a.curie && a.federico && a.avogadro);
-        assert_eq!(serde_json::to_value(Variante::FedericoII).unwrap(), "Federico II");
+        assert!(
+            a.scambio && a.einstein && a.fermi && a.pascal && a.curie && a.federico && a.avogadro
+        );
+        assert_eq!(
+            serde_json::to_value(Variante::FedericoII).unwrap(),
+            "Federico II"
+        );
     }
 }
