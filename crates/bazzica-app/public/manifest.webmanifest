@@ -1,0 +1,17 @@
+{
+  "name": "Bazzica",
+  "short_name": "Bazzica",
+  "description": "Il gioco di carte della Bazzica, tra amici e senza server.",
+  "lang": "it",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#134a27",
+  "theme_color": "#134a27",
+  "icons": [
+    { "src": "icone/icona-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icone/icona-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icone/icona-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

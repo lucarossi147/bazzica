@@ -224,7 +224,6 @@ fn App() -> Element {
     let vista = ctx.vista();
     rsx! {
         document::Stylesheet { href: asset!("/assets/style.css") }
-        document::Meta { name: "theme-color", content: "#134a27" }
         match (conn, vista) {
             (None, _) => rsx! { home::Home {} },
             (Some(c), None) => rsx! { Attesa { codice: c.codice.clone() } },
