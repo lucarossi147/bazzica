@@ -336,6 +336,15 @@ fn partita_completa_tra_quattro_peer() {
                 .any(|v| matches!(v, Voce::Azione(Azione::Gioca { seat: 1, .. })))
         );
         assert!(r.rifiuti.is_empty(), "{:?}", r.rifiuti);
+        // snapshots must fit in one WebRTC message (Safari: 64 KiB to be safe)
+        let istantanea = Messaggio::Istantanea {
+            epoca: 0,
+            host: "a".into(),
+            tavolo: Box::new(t.clone()),
+        };
+        let dim = istantanea.codifica().len();
+        println!("{variante:?}: snapshot {dim} bytes");
+        assert!(dim < 64 * 1024, "snapshot too large: {dim} bytes");
     }
 }
 
