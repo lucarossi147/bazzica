@@ -279,7 +279,7 @@
 
   /** Campana/campanello: parziali inarmoniche che si spengono lentamente. */
   function campana(t0, f, vol = 0.2) {
-    [[1, 1], [2.76, 0.5], [5.4, 0.25], [8.9, 0.12]].forEach(([k, v]) => tono(f * k, t0, 1.4 / Math.sqrt(k), { vol: vol * v }));
+    [[1, 1], [2.76, 0.5], [5.4, 0.25], [8.9, 0.12]].forEach(([k, v]) => f * k < 16000 && tono(f * k, t0, 1.4 / Math.sqrt(k), { vol: vol * v }));
   }
 
   /** Nota di ottone (tromba): dente di sega filtrato con apertura del filtro. */
