@@ -84,6 +84,19 @@ impl Rete {
         self.pompa();
     }
 
+    /// Cuts every connection of `h` (like a phone going to sleep) and hands back its node.
+    fn isola(&mut self, h: H) -> Nodo<H> {
+        let mut n = self.nodi.remove(&h).unwrap();
+        self.coda.retain(|(a, b, _)| *a != h && *b != h);
+        for (k, o) in self.nodi.iter_mut() {
+            o.disconnesso(self.ora, &h);
+            n.disconnesso(self.ora, k);
+        }
+        let _ = n.uscite();
+        self.pompa();
+        n
+    }
+
     fn nodo(&self, h: H) -> &Nodo<H> {
         &self.nodi[&h]
     }
@@ -610,4 +623,100 @@ fn effimeri() {
     r.coda.push_back((a, c, falso.codifica()));
     r.pompa();
     assert_eq!(r.effimeri[&c].len(), 1);
+}
+
+/// A, the host, only watches; B and C play with two bots.
+fn tavolo_host_spettatore() -> (Rete, H, H, H) {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let b = r.unisci("b");
+    let c = r.unisci("c");
+    r.richiedi(b, Richiesta::Siedi { posto: 0 });
+    r.richiedi(c, Richiesta::Siedi { posto: 1 });
+    r.richiedi(
+        a,
+        Richiesta::Bot {
+            posto: 2,
+            aggiungi: true,
+        },
+    );
+    r.richiedi(
+        a,
+        Richiesta::Bot {
+            posto: 3,
+            aggiungi: true,
+        },
+    );
+    r.richiedi(a, Richiesta::Avvia);
+    (r, a, b, c)
+}
+
+#[test]
+fn spettatore_che_dorme_non_si_proclama_host() {
+    let (mut r, a, _, _) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    let d = r.unisci("d");
+    let dorme = r.isola(d);
+    assert!(
+        dorme.host().is_none(),
+        "an isolated peer must not claim the host role"
+    );
+    r.gioca_fino(60);
+    let d = r.entra(dorme);
+    r.assert_sincronizzati();
+    assert!(r.nodo(a).e_host() && !r.nodo(d).e_host());
+    assert_eq!(r.nodo(a).epoca(), 0);
+}
+
+#[test]
+fn host_che_dorme_non_impone_lo_stato_vecchio() {
+    let (mut r, a, b, _) = tavolo_host_spettatore();
+    r.gioca_fino(20);
+    let dorme = r.isola(a);
+    assert!(r.nodo(b).e_host());
+    r.gioca_fino(80);
+    let n = r.tavolo(b).n;
+    let a = r.entra(dorme);
+    r.assert_sincronizzati();
+    assert!(r.nodo(b).e_host() && !r.nodo(a).e_host());
+    assert_eq!(
+        r.tavolo(a).n,
+        n,
+        "the stale replica of the old host was not adopted"
+    );
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn giocatore_che_dorme_mette_in_pausa_e_poi_riprende() {
+    let (mut r, a, b, _) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    let n = r.tavolo(a).n;
+    let dorme = r.isola(b);
+    for _ in 0..10 {
+        r.avanza(60_000);
+    }
+    assert!(r.nodo(a).in_pausa());
+    assert_eq!(r.tavolo(a).n, n);
+    r.entra(dorme);
+    r.assert_sincronizzati();
+    assert!(!r.nodo(a).in_pausa());
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn rimasto_solo_poi_qualcuno_rientra() {
+    // everyone but c leaves; c keeps the table and hands it to whoever comes back
+    let (mut r, a, b, c) = tavolo_host_spettatore();
+    r.gioca_fino(20);
+    let n = r.tavolo(c).n;
+    r.esci(a);
+    r.esci(b);
+    assert!(r.nodo(c).host().is_none());
+    let b2 = r.unisci("b");
+    r.assert_sincronizzati();
+    assert!(r.nodo(c).e_host());
+    assert_eq!(r.tavolo(b2).n, n, "b got c's replica");
 }

@@ -39,6 +39,8 @@ pub enum Messaggio {
     Ciao {
         versione: u32,
         io: Partecipante,
+        /// Whether the sender already holds a replica of the table.
+        replica: bool,
     },
     /// Player -> host.
     Richiesta {

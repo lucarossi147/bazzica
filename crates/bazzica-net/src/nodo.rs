@@ -71,6 +71,14 @@ pub enum Uscita<P> {
     },
 }
 
+/// A connected peer that introduced itself.
+#[derive(Clone, Debug)]
+struct Remoto {
+    id: IdGiocatore,
+    /// Whether it holds a replica (only those can take over as host).
+    replica: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Piano {
     Bot(Seat),
@@ -98,7 +106,7 @@ pub struct Nodo<P> {
     epoca: u64,
     host: Option<IdGiocatore>,
     /// Connected peers and, once they said hello, who they are.
-    peers: BTreeMap<P, Option<IdGiocatore>>,
+    peers: BTreeMap<P, Option<Remoto>>,
     rid: u64,
     attesa_istantanea: bool,
     // host only
@@ -167,7 +175,12 @@ impl<P: Clone + Ord> Nodo<P> {
 
     /// Ids of the participants reachable from here (this peer included).
     pub fn connessi(&self) -> BTreeSet<IdGiocatore> {
-        let mut s: BTreeSet<_> = self.peers.values().flatten().cloned().collect();
+        let mut s: BTreeSet<_> = self
+            .peers
+            .values()
+            .flatten()
+            .map(|r| r.id.clone())
+            .collect();
         s.insert(self.io.id.clone());
         s
     }
@@ -213,6 +226,7 @@ impl<P: Clone + Ord> Nodo<P> {
             Messaggio::Ciao {
                 versione: VERSIONE_PROTOCOLLO,
                 io: self.io.clone(),
+                replica: self.tavolo.is_some(),
             },
         );
     }
@@ -293,16 +307,28 @@ impl<P: Clone + Ord> Nodo<P> {
         if !self.peers.contains_key(&p) {
             return;
         }
-        if let Messaggio::Ciao { versione, io } = msg {
+        if let Messaggio::Ciao {
+            versione,
+            io,
+            replica,
+        } = msg
+        {
             if versione == VERSIONE_PROTOCOLLO {
-                self.ciao(p, io);
+                self.ciao(p, io, replica);
             }
             return;
         }
         // everything else only from peers that introduced themselves
-        let Some(Some(da)) = self.peers.get(&p).cloned() else {
+        let Some(Some(remoto)) = self.peers.get_mut(&p) else {
             return;
         };
+        if matches!(
+            msg,
+            Messaggio::Voce { .. } | Messaggio::Istantanea { .. } | Messaggio::Host { .. }
+        ) {
+            remoto.replica = true;
+        }
+        let da = remoto.id.clone();
         match msg {
             Messaggio::Ciao { .. } => unreachable!(),
             Messaggio::Richiesta { rid, richiesta } => {
@@ -339,8 +365,15 @@ impl<P: Clone + Ord> Nodo<P> {
 
     // ------------------------------------------------------------------ message handling
 
-    fn ciao(&mut self, p: P, io: Partecipante) {
-        self.peers.insert(p.clone(), Some(io.id.clone()));
+    fn ciao(&mut self, p: P, io: Partecipante, replica: bool) {
+        let remoto = Remoto {
+            id: io.id.clone(),
+            replica,
+        };
+        self.peers.insert(p.clone(), Some(remoto));
+        if self.host.is_none() {
+            self.elezione();
+        }
         if !self.e_host() {
             return;
         }
@@ -439,7 +472,9 @@ impl<P: Clone + Ord> Nodo<P> {
             return;
         }
         self.segui(epoca, da.clone());
-        let Some(t) = &self.tavolo else { return };
+        let Some(t) = &self.tavolo else {
+            return self.chiedi(p, 0);
+        };
         if t.n > n {
             let msg = Messaggio::Istantanea {
                 epoca,
@@ -527,7 +562,7 @@ impl<P: Clone + Ord> Nodo<P> {
         let h = self.host.as_ref()?;
         self.peers
             .iter()
-            .find(|(_, id)| id.as_ref() == Some(h))
+            .find(|(_, r)| r.as_ref().is_some_and(|r| &r.id == h))
             .map(|(p, _)| p.clone())
     }
 
@@ -542,15 +577,26 @@ impl<P: Clone + Ord> Nodo<P> {
     }
 
     /// The host is gone: the first connected participant in join order takes over.
+    /// A peer with nobody around waits instead, and runs the election again on the next hello.
     fn elezione(&mut self) {
         let Some(t) = &self.tavolo else { return };
         let connessi = self.connessi();
+        // only peers holding a replica can host (a freshly opened page has none)
+        let mut con_replica: BTreeSet<&IdGiocatore> = self
+            .peers
+            .values()
+            .flatten()
+            .filter(|r| r.replica)
+            .map(|r| &r.id)
+            .collect();
+        con_replica.insert(&self.io.id);
         let candidato = t
             .partecipanti
             .iter()
-            .find(|p| connessi.contains(&p.id))
+            .find(|p| con_replica.contains(&p.id))
             .map(|p| p.id.clone());
-        if candidato.as_ref() == Some(&self.io.id) {
+        // alone (e.g. a phone that just woke up): never claim, our replica may be stale
+        if connessi.len() > 1 && candidato.as_ref() == Some(&self.io.id) {
             self.epoca += 1;
             self.host = Some(self.io.id.clone());
             let n = t.n;
@@ -583,6 +629,13 @@ impl<P: Clone + Ord> Nodo<P> {
             host: host.clone(),
             tavolo: Box::new(t.clone()),
         };
+        for (p, r) in self.peers.iter_mut() {
+            if let Some(r) = r
+                && (a == Destinatario::Tutti || a == Destinatario::Uno(p.clone()))
+            {
+                r.replica = true;
+            }
+        }
         self.invia(a, msg);
     }
 
