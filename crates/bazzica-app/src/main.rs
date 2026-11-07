@@ -3,6 +3,7 @@
 
 mod carte;
 mod connessione;
+mod fx;
 mod home;
 mod partita;
 mod profilo;
@@ -12,11 +13,14 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::time::Duration;
 
-use bazzica_core::Fase;
-use bazzica_net::{IdGiocatore, Richiesta, StatoTavolo, Tavolo, Uscita};
+use bazzica_core::{Evento, Fase, Seat};
+use bazzica_net::tavolo::FRASI;
+use bazzica_net::{Effimero, IdGiocatore, Richiesta, StatoTavolo, Tavolo, Uscita, Voce};
 use bazzica_rete::matchbox::PeerId;
 use dioxus::prelude::*;
+use serde_json::json;
 
+use carte::Mazzo;
 use connessione::{Connessione, ora};
 use profilo::Profilo;
 
@@ -43,6 +47,9 @@ pub struct Ctx {
     pub ora: Signal<u64>,
     /// Key of the turn timer currently running and when this device saw it start.
     pub turno: Signal<(String, u64)>,
+    /// Card deck shown on this device.
+    pub mazzo: Signal<Mazzo>,
+    pub muto: Signal<bool>,
 }
 
 /// What the screens render: a copy of the replica plus connection facts.
@@ -93,12 +100,24 @@ impl Ctx {
 
     fn gestisci(&self, c: &Connessione, uscite: Vec<Uscita<PeerId>>) {
         let mut cambiato = false;
+        let mut effetti: Vec<serde_json::Value> = vec![];
         for u in uscite {
             match u {
-                Uscita::Applicata { .. } | Uscita::Sincronizzata => cambiato = true,
+                Uscita::Applicata { voce, eventi } => {
+                    cambiato = true;
+                    effetti.extend(eventi_visibili(c, &voce, &eventi));
+                }
+                Uscita::Sincronizzata => cambiato = true,
                 Uscita::Rifiutata { motivo } => self.avvisa(motivo),
-                _ => {}
+                Uscita::Effimero { effetto, .. } => {
+                    effetti.push(effimero_json(&effetto));
+                }
+                Uscita::Invia { .. } => {}
             }
+        }
+        if !effetti.is_empty() {
+            // remember where everything is before the new state is drawn
+            fx::istantanea();
         }
         if cambiato {
             if let Some(t) = c.sessione.borrow().nodo().tavolo() {
@@ -106,10 +125,20 @@ impl Ctx {
                 if self.turno.peek().0 != chiave {
                     let mut turno = self.turno;
                     turno.set((chiave, ora()));
+                    if tocca_a_me(t, &self.profilo.peek().id) {
+                        fx::turno();
+                    }
                 }
             }
             let mut v = self.versione;
             v += 1;
+        }
+        if !effetti.is_empty() {
+            let contesto = contesto_fx(c, (self.mazzo)());
+            fx::eventi(
+                &serde_json::Value::Array(effetti).to_string(),
+                &contesto.to_string(),
+            );
         }
     }
 
@@ -118,6 +147,93 @@ impl Ctx {
         conn.set(None);
         imposta_codice_url("");
     }
+}
+
+/// Seat this device shows the game from: the one that must act now, else its first seat.
+pub fn posto_vista(t: &Tavolo, io: &str) -> Seat {
+    let miei = t.posti_di(io);
+    let st = t.partita.as_ref();
+    miei.iter()
+        .copied()
+        .find(|s| st.is_some_and(|st| st.required_actors().contains(s)))
+        .or(miei.first().copied())
+        .unwrap_or(0)
+}
+
+fn tocca_a_me(t: &Tavolo, io: &str) -> bool {
+    match (&t.stato, &t.partita) {
+        (StatoTavolo::InCorso, Some(st)) => {
+            st.fase == Fase::Gioco && t.posti_di(io).contains(&st.corrente)
+        }
+        _ => false,
+    }
+}
+
+/// Seconds left on my turn, when it is my turn and the play timer is on.
+fn secondi_rimasti(c: &Connessione, ctx: Ctx, adesso: u64) -> Option<u64> {
+    let s = c.sessione.borrow();
+    let n = s.nodo();
+    let t = n.tavolo()?;
+    let durata = u64::from(t.impostazioni.timer_giocata);
+    if durata == 0 || n.in_pausa() || !tocca_a_me(t, &n.io().id) {
+        return None;
+    }
+    let inizio = ctx.turno.peek().1;
+    Some(durata.saturating_sub(adesso.saturating_sub(inizio) / 1000))
+}
+
+/// Engine events this device may see (private ones only for its own seats), as JSON.
+fn eventi_visibili(c: &Connessione, voce: &Voce, eventi: &[Evento]) -> Vec<serde_json::Value> {
+    let s = c.sessione.borrow();
+    let n = s.nodo();
+    let Some(t) = n.tavolo() else {
+        return vec![];
+    };
+    let miei = t.posti_di(&n.io().id);
+    let mut out = vec![];
+    if let Voce::Scaduto { timer, seat, .. } = voce {
+        out.push(json!({"tipo": "tempo_scaduto", "fase": timer, "seat": seat}));
+    }
+    for e in eventi {
+        let visibile = e
+            .visibile
+            .as_ref()
+            .is_none_or(|v| v.iter().any(|s| miei.contains(s)));
+        if visibile && let Ok(v) = serde_json::to_value(e) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+fn effimero_json(e: &Effimero) -> serde_json::Value {
+    match e {
+        Effimero::Frase { seat, indice } => json!({
+            "tipo": "frase",
+            "seat": seat,
+            "testo": FRASI.get(usize::from(*indice)).copied().unwrap_or(""),
+        }),
+        Effimero::Striscia { seat, verso } => {
+            json!({"tipo": "striscia", "seat": seat, "verso": verso})
+        }
+    }
+}
+
+/// What the effects need to know about the table and the viewer.
+fn contesto_fx(c: &Connessione, mazzo: Mazzo) -> serde_json::Value {
+    let s = c.sessione.borrow();
+    let n = s.nodo();
+    let Some(t) = n.tavolo() else {
+        return json!({});
+    };
+    let io = &n.io().id;
+    json!({
+        "io": posto_vista(t, io),
+        "miei": t.posti_di(io),
+        "nomi": (0..4u8).map(|s| t.nome_posto(s)).collect::<Vec<_>>(),
+        "squadre": t.impostazioni.squadre,
+        "mazzo": mazzo.chiave(),
+    })
 }
 
 /// Identifies the running turn timer, to estimate the countdown on every device.
@@ -176,6 +292,8 @@ fn App() -> Element {
         avviso: Signal::new(None),
         ora: Signal::new(ora()),
         turno: Signal::new((String::new(), ora())),
+        mazzo: Signal::new(Mazzo::carica()),
+        muto: Signal::new(fx::muto()),
     });
 
     // drive the network: ~20 times a second
@@ -183,6 +301,7 @@ fn App() -> Element {
         let mut nascosto_da: Option<u64> = None;
         let mut ultima_riapertura = 0u64;
         let mut connessi = BTreeSet::new();
+        let mut ultimo_tic = 0u64;
         loop {
             futures_timer::Delay::new(Duration::from_millis(50)).await;
             let adesso = ora();
@@ -211,6 +330,14 @@ fn App() -> Element {
             }
             let uscite = c.aggiorna();
             ctx.gestisci(&c, uscite);
+            // last five seconds of my turn: tick
+            if let Some(rimasti) = secondi_rimasti(&c, ctx, adesso)
+                && (1..=5).contains(&rimasti)
+                && rimasti != ultimo_tic
+            {
+                ultimo_tic = rimasti;
+                fx::tic();
+            }
             let ora_connessi = c.sessione.borrow().nodo().connessi();
             if ora_connessi != connessi {
                 connessi = ora_connessi;

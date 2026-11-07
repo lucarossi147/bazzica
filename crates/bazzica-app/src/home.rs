@@ -4,6 +4,7 @@ use bazzica_net::tavolo::{AVATAR, MAX_NOME};
 use bazzica_rete::nostr::{normalizza_codice, nuovo_codice};
 use dioxus::prelude::*;
 
+use crate::carte::SceltaMazzo;
 use crate::connessione::Connessione;
 use crate::{Ctx, codice_da_url, imposta_codice_url};
 
@@ -63,6 +64,10 @@ pub fn Home() -> Element {
                         }
                     }
                 }
+            }
+            div { class: "pannello",
+                label { "Carte" }
+                SceltaMazzo {}
             }
             div { class: "pannello",
                 button {

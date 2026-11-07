@@ -204,3 +204,14 @@ summary { cursor: pointer; color: var(--muted); }
 @media (min-width: 700px) {
   .stanza { flex-direction: row; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
 }
+
+/* ---------- decks and settings ---------- */
+.carta.piacentine { aspect-ratio: 336 / 594; }
+.scelta-mazzo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mazzo { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; align-items: center; background: #f1ead8; color: var(--ink); padding: 8px; }
+.mazzo img { width: 100%; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+.mazzo span { grid-column: 1 / -1; font-size: 14px; }
+.mazzo.scelto { background: var(--gold); box-shadow: inset 0 0 0 2px var(--wood-dark); font-weight: 700; }
+.impostazioni h3 { margin: 14px 0 6px; }
+.impostazioni h3:first-child { margin-top: 0; }
+.finestra .menu-partita { color: var(--ink); justify-content: flex-start; }

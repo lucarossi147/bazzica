@@ -17,12 +17,7 @@ pub fn Partita(vista: Vista) -> Element {
     let miei = t.posti_di(&vista.io);
     let spettatore = miei.is_empty();
     // with several seats (testing alone), show the one that must act
-    let seat = miei
-        .iter()
-        .copied()
-        .find(|s| st.required_actors().contains(s))
-        .or(miei.first().copied())
-        .unwrap_or(0);
+    let seat = crate::posto_vista(t, &vista.io);
     let obs = st.observation(seat);
     let pos = |d: u8| (seat + d) % 4;
     let finita = t.stato == StatoTavolo::Finita;
@@ -92,7 +87,7 @@ fn Avversario(vista: Vista, obs: Osservazione, seat: Seat) -> Element {
         if scollegato { " scollegato" } else { "" }
     );
     rsx! {
-        div { class: "{classe}",
+        div { class: "{classe}", "data-seat": "{seat}",
             div { class: "chi",
                 span { class: "avatar-piccolo", "{avatar}" }
                 span { "{nome}" }
@@ -132,7 +127,7 @@ fn Centro(vista: Vista, obs: Osservazione) -> Element {
             span { "Mazzo {obs.carte_nel_mazzo} · Prese " }
             for sq in 0..2usize {
                 if sq == 1 { span { "–" } }
-                span { class: "sq{sq}",
+                span { class: "sq{sq}", "data-prese": "{sq}",
                     "{obs.prese[sq].n}"
                     if !obs.prese[sq].scoperte.is_empty() { " ({obs.prese[sq].scoperte.len()} sc.)" }
                     if obs.credito[sq] > 0 { " +{obs.credito[sq]} cred." }
@@ -264,7 +259,7 @@ fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
                     button { class: "secondario", onclick: move |_| scelta.set(None), "Annulla" }
                 }
             }
-            div { class: "carte-mano",
+            div { class: "carte-mano", "data-seat": "{seat}",
                 for c in mano {
                     Carta {
                         carta: c,

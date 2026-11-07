@@ -6,7 +6,8 @@ use bazzica_net::tavolo::AVATAR_BOT;
 use bazzica_net::{Impostazioni, Posto, Richiesta, StatoTavolo};
 use dioxus::prelude::*;
 
-use crate::{Ctx, Vista, link_tavolo, partita};
+use crate::carte::SceltaMazzo;
+use crate::{Ctx, Vista, fx, link_tavolo, partita};
 
 #[component]
 pub fn Tavolo(vista: Vista) -> Element {
@@ -29,6 +30,8 @@ pub fn Tavolo(vista: Vista) -> Element {
 fn Intestazione(vista: Vista, menu: bool) -> Element {
     let ctx = use_context::<Ctx>();
     let mut qr = use_signal(|| false);
+    let mut aperto = use_signal(|| false);
+    let mut muto = ctx.muto;
     let codice = ctx
         .conn
         .read()
@@ -37,13 +40,8 @@ fn Intestazione(vista: Vista, menu: bool) -> Element {
         .unwrap_or_default();
     let link = link_tavolo(&codice);
     let link_copia = link.clone();
-    let svg = use_memo(move || qr_svg(&link_tavolo(&codice)));
-    let codice = ctx
-        .conn
-        .read()
-        .as_ref()
-        .map(|c| c.codice.clone())
-        .unwrap_or_default();
+    let codice_qr = codice.clone();
+    let svg = use_memo(move || qr_svg(&link_tavolo(&codice_qr)));
     rsx! {
         header { class: "intestazione",
             div { class: "titolo",
@@ -53,17 +51,54 @@ fn Intestazione(vista: Vista, menu: bool) -> Element {
             div { class: "azioni",
                 button {
                     class: "piccolo",
-                    onclick: move |_| {
-                        copia(&link_copia);
-                        ctx.avvisa("Link copiato: mandalo agli amici");
-                    },
-                    "Link"
-                }
-                button { class: "piccolo", onclick: move |_| qr.toggle(), "QR" }
-                if menu {
-                    partita::Menu {}
+                    title: "Invita, carte, suoni",
+                    onclick: move |_| aperto.toggle(),
+                    "⚙"
                 }
                 button { class: "piccolo secondario", onclick: move |_| ctx.esci(), "Esci" }
+            }
+        }
+        if aperto() {
+            div { class: "velo", onclick: move |_| aperto.set(false),
+                div { class: "finestra impostazioni", onclick: move |e| e.stop_propagation(),
+                    h3 { "Invita al tavolo" }
+                    div { class: "riga",
+                        button {
+                            onclick: move |_| {
+                                copia(&link_copia);
+                                ctx.avvisa("Link copiato: mandalo agli amici");
+                            },
+                            "Copia il link"
+                        }
+                        button {
+                            onclick: move |_| {
+                                aperto.set(false);
+                                qr.set(true);
+                            },
+                            "Mostra il QR"
+                        }
+                    }
+                    h3 { "Carte" }
+                    SceltaMazzo {}
+                    h3 { "Suoni" }
+                    label { class: "spunta",
+                        input {
+                            r#type: "checkbox",
+                            checked: !muto(),
+                            onchange: move |e| {
+                                let m = !e.checked();
+                                fx::set_muto(m);
+                                muto.set(m);
+                            },
+                        }
+                        "Suoni ed effetti sonori"
+                    }
+                    if menu {
+                        h3 { "Partita" }
+                        partita::Menu {}
+                    }
+                    button { class: "primario", onclick: move |_| aperto.set(false), "Chiudi" }
+                }
             }
         }
         if qr() {
