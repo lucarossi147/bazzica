@@ -10,7 +10,11 @@ publish = false
 [dependencies]
 bazzica-core = { path = "../bazzica-core" }
 bazzica-net = { path = "../bazzica-net" }
-dioxus = { version = "=0.7.9", features = ["web"] }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
 bazzica-rete = { path = "../bazzica-rete" }
+dioxus = { version = "=0.7.9", features = ["web"] }
+futures-timer = { version = "3", features = ["wasm-bindgen"] }
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Location", "Storage", "History", "Navigator", "Clipboard", "VisibilityState"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+log = "0.4"
+console_log = "1"

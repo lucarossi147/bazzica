@@ -37,3 +37,4 @@ assets/cards/Carte_piacentine_al_completo.png
 
 # --- Web app build output ---
 /crates/bazzica-app/dist/
+/.venv/
