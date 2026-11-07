@@ -9,3 +9,8 @@ mod ws;
 
 pub use segnalatore::{NostrSignallerBuilder, RELAY_PREDEFINITI};
 pub use sessione::Sessione;
+
+/// Re-exported so apps do not need to depend on matchbox directly.
+pub mod matchbox {
+    pub use matchbox_socket::{MessageLoopFuture, PeerId};
+}

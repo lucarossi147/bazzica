@@ -246,6 +246,14 @@ impl<P: Clone + Ord> Nodo<P> {
         self.ripianifica();
     }
 
+    /// Drops every connection (the transport was rebuilt, e.g. after the device slept).
+    pub fn scollega_tutti(&mut self, ora: u64) {
+        let peers: Vec<P> = self.peers.keys().cloned().collect();
+        for p in peers {
+            self.disconnesso(ora, &p);
+        }
+    }
+
     pub fn tick(&mut self, ora: u64) {
         self.ora = ora;
         while self.e_host() {

@@ -28,7 +28,28 @@ impl Sessione {
         segnalatore: NostrSignallerBuilder,
         nodo: Nodo<PeerId>,
     ) -> (Sessione, MessageLoopFuture) {
-        let (socket, ciclo) = WebRtcSocket::builder(crate::nostr::normalizza_codice(codice))
+        let (socket, ciclo) = Self::socket(codice, segnalatore);
+        (Sessione { socket, nodo }, ciclo)
+    }
+
+    /// Rebuilds the WebRTC socket (after the page slept or signaling died), keeping the replica.
+    pub fn riapri(
+        &mut self,
+        ora: u64,
+        codice: &str,
+        segnalatore: NostrSignallerBuilder,
+    ) -> MessageLoopFuture {
+        self.nodo.scollega_tutti(ora);
+        let (socket, ciclo) = Self::socket(codice, segnalatore);
+        self.socket = socket;
+        ciclo
+    }
+
+    fn socket(
+        codice: &str,
+        segnalatore: NostrSignallerBuilder,
+    ) -> (WebRtcSocket, MessageLoopFuture) {
+        WebRtcSocket::builder(crate::nostr::normalizza_codice(codice))
             .signaller_builder(Arc::new(segnalatore))
             .ice_server(RtcIceServerConfig {
                 urls: STUN.map(String::from).to_vec(),
@@ -38,8 +59,7 @@ impl Sessione {
             .signaling_keep_alive_interval(Some(std::time::Duration::from_secs(5)))
             .reconnect_attempts(Some(3))
             .add_reliable_channel()
-            .build();
-        (Sessione { socket, nodo }, ciclo)
+            .build()
     }
 
     pub fn nodo(&self) -> &Nodo<PeerId> {
