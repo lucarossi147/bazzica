@@ -1,0 +1,15 @@
+[package]
+name = "bazzica-core"
+description = "Pure rules engine and bots for the Bazzica card game (no I/O)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+flate2 = "1"
+sha2 = "0.10"
