@@ -6,10 +6,12 @@
 
 pub mod bazzica;
 pub mod cards;
+pub mod game;
 pub mod prng;
 pub mod rules;
 pub mod scoring;
 
-pub use cards::{Card, MAZZO, RE_BELLO, SETTE_BELLO, DUE_DENARI, Seme};
+pub use cards::{Card, DUE_DENARI, MAZZO, RE_BELLO, SETTE_BELLO, Seme};
+pub use game::{Azione, AzioneNonValida, Evento, Fase, GameState, Osservazione, Seat, Vincitore};
 pub use prng::Mulberry32;
 pub use rules::{RulesConfig, Variante};
