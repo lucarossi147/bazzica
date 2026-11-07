@@ -1,0 +1,224 @@
+/*
+ * Bazzica — stili degli effetti (port di bazzica/web/css/style.css).
+ * Tutto vive dentro #fx oppure usa classi con prefisso fx- (anche i keyframes),
+ * così non può toccare gli stili dell'app.
+ */
+
+#fx {
+  --fx-outline: #3a1d0b;
+  --fx-gold: #ffd23f;
+  --fx-sky: #5ad1ff;
+  --fx-pop: #ff4fa3;
+  position: fixed; inset: 0; pointer-events: none; z-index: 60; overflow: hidden;
+  font-family: "Fredoka", "Baloo 2", ui-rounded, "Nunito", system-ui, sans-serif;
+  color: #1d1a14;
+}
+#fx * { box-sizing: border-box; pointer-events: none; }
+
+/* ---------- carte degli effetti (div con l'immagine di sfondo) ---------- */
+#fx .fx-carta { position: relative; display: block; aspect-ratio: 240 / 400; border-radius: 7px; background: #fff center / 100% 100% no-repeat; box-shadow: 0 2px 6px rgba(0,0,0,.35); flex: none; }
+#fx .fx-carta.fx-piac { aspect-ratio: 0.565; }
+#fx .fx-valore-7b { position: absolute; bottom: -8px; right: -8px; width: 26px; height: 26px; border-radius: 50%; background: #a52a8a; color: #fff; display: grid; place-items: center; font-weight: 800; font-size: 13px; border: 2px solid #fff; }
+#fx .fx-carte-giganti .fx-valore-7b { width: 46px; height: 46px; font-size: 24px; bottom: -14px; right: -14px; border-width: 3px; }
+
+/* carte rimaste in tavola dopo il nuovo render (prese, non ancora volate via) */
+#fx .fx-fantasma { position: fixed; z-index: 5; transition: transform .25s, opacity .3s; }
+#fx .fx-fantasma .fx-carta { width: 100%; height: 100%; border-radius: 4px; }
+#fx .fx-fantasma.fx-evidenzia { transform: translateY(-6px); }
+#fx .fx-fantasma.fx-evidenzia .fx-carta { box-shadow: 0 0 0 4px #fff, 0 0 0 7px var(--fx-outline), 0 0 22px 6px var(--fx-gold); }
+#fx .fx-fantasma.fx-svanisci { opacity: 0; }
+
+/* ---------- toast ---------- */
+#fx .fx-toast { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: #222; color: #fff; padding: 10px 18px; border-radius: 14px; border: 3px solid #fff; z-index: 90; font-weight: 600; font-size: 15px; max-width: 90%; text-align: center; transition: opacity .3s; }
+#fx .fx-toast.fx-nascosto { opacity: 0; }
+
+/* ---------- volo, banner, scintille, fumetti, fiamme ---------- */
+#fx .fx-volante { position: fixed; z-index: 60; transition: transform .45s cubic-bezier(.3,.7,.3,1), opacity .3s; will-change: transform; }
+#fx .fx-volante .fx-carta { width: 100%; height: 100%; }
+#fx .fx-banner { position: fixed; left: 50%; top: 42%; transform: translate(-50%, -50%) scale(.3); font-family: inherit; font-weight: 800; font-size: clamp(40px, 9vw, 110px); color: var(--fx-gold); letter-spacing: .03em;
+  -webkit-text-stroke: 5px var(--fx-outline); paint-order: stroke fill; text-shadow: 0 7px 0 var(--fx-outline), 0 0 30px rgba(255,210,63,.7);
+  opacity: 0; animation: fx-banner 1.6s cubic-bezier(.2,1.4,.4,1) forwards; white-space: nowrap; z-index: 74; text-align: center; }
+#fx .fx-banner small { display: block; font-size: 30%; text-align: center; color: #fff; letter-spacing: .02em; -webkit-text-stroke: 2px var(--fx-outline); text-shadow: 0 3px 0 var(--fx-outline); white-space: normal; }
+#fx .fx-banner.fx-bazzica { color: #ff8fd0; text-shadow: 0 7px 0 var(--fx-outline), 0 0 30px rgba(255,79,163,.8); }
+#fx .fx-banner.fx-napola { color: #fff3a0; text-shadow: 0 7px 0 var(--fx-outline), 0 0 40px rgba(255,215,0,1); }
+#fx .fx-banner.fx-veloce { font-size: clamp(30px, 6vw, 70px); top: 30%; color: #ffb000; text-shadow: 0 5px 0 var(--fx-outline), 0 0 24px #ff4800, 0 0 50px #ff2000; }
+#fx .fx-banner.fx-asso { color: #a8ff7a; text-shadow: 0 7px 0 var(--fx-outline), 0 0 30px rgba(140,255,100,.8); }
+#fx .fx-banner.fx-b2 { font-size: clamp(40px, 8vw, 96px); }
+#fx .fx-banner.fx-b3 { font-size: clamp(48px, 10vw, 120px); }
+#fx .fx-banner.fx-b5 { font-size: clamp(56px, 12vw, 150px); color: #ff4fa3; top: 20%; }
+#fx .fx-banner.fx-b7 { top: 20%; font-size: clamp(60px, 14vw, 180px); background: linear-gradient(90deg, #ff004c, #ff8a00, #ffe600, #2bd96b, #19c3ff, #8a4dff, #ff004c); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: fx-banner 3.2s cubic-bezier(.2,1.4,.4,1) forwards, fx-arcobaleno .6s linear infinite; }
+#fx .fx-banner.fx-napola.fx-b7 { top: 27%; }
+@keyframes fx-banner { 0% { opacity: 0; transform: translate(-50%, -50%) scale(.3) rotate(-6deg); } 18% { opacity: 1; transform: translate(-50%, -50%) scale(1.08) rotate(2deg); } 30% { transform: translate(-50%, -50%) scale(1) rotate(0); } 80% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%, -60%) scale(1.05); } }
+@keyframes fx-arcobaleno { to { background-position: 200% 0; } }
+
+#fx .fx-scintilla { position: fixed; width: 9px; height: 9px; border-radius: 50%; background: var(--fx-gold); box-shadow: 0 0 8px var(--fx-gold); z-index: 69; animation: fx-scintilla 1s ease-out forwards; }
+@keyframes fx-scintilla { to { transform: translate(var(--dx), var(--dy)) scale(.2); opacity: 0; } }
+
+#fx .fx-fumetto { position: fixed; z-index: 75; background: #fff; color: #1d1a14; font-family: inherit; font-weight: 900; font-size: 22px; padding: 10px 18px; border-radius: 24px; border: 4px solid #1d1a14; box-shadow: 5px 5px 0 var(--fx-outline); transform: translate(-50%, -100%) scale(0); animation: fx-fumetto 2.4s cubic-bezier(.2,1.6,.4,1) forwards; white-space: nowrap; }
+#fx .fx-fumetto::after { content: ""; position: absolute; left: 30px; bottom: -14px; border: 10px solid transparent; border-top-color: #1d1a14; border-bottom: 0; }
+@keyframes fx-fumetto { 0% { transform: translate(-50%, -100%) scale(0) rotate(-10deg); } 15% { transform: translate(-50%, -100%) scale(1.15) rotate(3deg); } 25% { transform: translate(-50%, -100%) scale(1) rotate(-2deg); } 35% { transform: translate(-50%, -100%) scale(1) rotate(1deg); } 85% { opacity: 1; } 100% { transform: translate(-50%, -110%) scale(1); opacity: 0; } }
+
+#fx .fx-fiamma { position: fixed; z-index: 64; width: 18px; height: 18px; border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%; background: radial-gradient(circle at 50% 70%, #fffbe0 0 12%, #ffd000 30%, #ff6a00 55%, #e01b00 68%, rgba(200,0,0,0) 74%); filter: blur(.4px) saturate(1.4); animation: fx-fiamma .7s ease-out forwards; }
+@keyframes fx-fiamma { 0% { transform: translate(-50%, -50%) scale(1); opacity: 1; } 100% { transform: translate(calc(-50% + var(--dx)), calc(-50% - 40px)) scale(.2); opacity: 0; } }
+#fx .fx-volante.fx-in-fiamme { filter: drop-shadow(0 0 10px #ff6a00) drop-shadow(0 0 22px #ff2a00); }
+#fx .fx-alone-fuoco { position: absolute; inset: -18px; border-radius: 18px; background: radial-gradient(ellipse, rgba(255,140,0,.0) 40%, rgba(255,100,0,.65) 62%, rgba(255,40,0,0) 75%); animation: fx-tremola .12s infinite alternate; }
+@keyframes fx-tremola { from { transform: scale(1) rotate(-2deg); } to { transform: scale(1.08) rotate(2deg); } }
+
+/* ---------- scosse dell'app (applicate a .partita) ---------- */
+.fx-scuoti { animation: fx-shake .45s cubic-bezier(.36,.07,.19,.97) both; }
+@keyframes fx-shake { 10%, 90% { transform: translate(-2px, 1px); } 20%, 80% { transform: translate(4px, -2px); } 30%, 50%, 70% { transform: translate(-6px, 2px); } 40%, 60% { transform: translate(6px, -1px); } }
+.fx-terremoto { animation: fx-terremoto .7s cubic-bezier(.36,.07,.19,.97) both; }
+@keyframes fx-terremoto { 10% { transform: translate(-12px, 8px) rotate(-1deg); } 20% { transform: translate(14px, -10px) rotate(1deg); } 30% { transform: translate(-16px, 6px); } 40% { transform: translate(12px, 10px) rotate(-.5deg); } 50% { transform: translate(-10px, -8px); } 60% { transform: translate(8px, 6px); } 70% { transform: translate(-6px, -4px); } 80% { transform: translate(4px, 2px); } 90% { transform: translate(-2px, 1px); } }
+
+/* ---------- umore dei giocatori (applicato all'avatar o al riquadro del posto) ---------- */
+span.fx-mosso { display: inline-block; }
+.fx-mosso { transition: filter .4s, transform .4s; }
+.fx-abbattuto { filter: grayscale(1) brightness(.75); transform: translateY(6px) scale(.9) rotate(-8deg); }
+.fx-triste { filter: saturate(.4) brightness(.9); transform: translateY(4px) rotate(-6deg); }
+.fx-arrabbiato { filter: sepia(1) saturate(5) hue-rotate(-30deg); animation: fx-arrabbiato .12s linear infinite; }
+@keyframes fx-arrabbiato { 0% { transform: translate(-2px, 0) rotate(-3deg); } 50% { transform: translate(2px, 1px) rotate(3deg); } 100% { transform: translate(-2px, 0) rotate(-3deg); } }
+.fx-felice { animation: fx-felice .5s ease-in-out 3; }
+@keyframes fx-felice { 50% { transform: translateY(-12px) scale(1.12) rotate(8deg); } }
+.fx-spazzato { animation: fx-spazzato 2.4s cubic-bezier(.3,0,.3,1) forwards; }
+@keyframes fx-spazzato { 0% { transform: none; } 30% { transform: translate(var(--fx-vx, 160px), -140px) rotate(720deg) scale(.4); opacity: .2; } 70% { transform: translate(var(--fx-vx, 160px), -140px) rotate(720deg) scale(.4); opacity: 0; } 100% { transform: none; opacity: 1; } }
+
+#fx .fx-lacrima { position: fixed; z-index: 76; font-size: 28px; animation: fx-lacrima 2.2s ease-in forwards; }
+@keyframes fx-lacrima { 0% { transform: translate(-50%, -50%) scale(0); opacity: 0; } 15% { transform: translate(-50%, -50%) scale(1.3); opacity: 1; } 70% { opacity: 1; } 100% { transform: translate(-50%, 30px) scale(1); opacity: 0; } }
+
+#fx .fx-reazione { position: fixed; z-index: 77; transform: translate(-50%, -100%); display: flex; flex-direction: column; align-items: center; animation: fx-reazione var(--dur, 2.4s) ease-out forwards; }
+#fx .fx-reazione .fx-emo { font-size: calc(30px * var(--k, 1)); line-height: 1; filter: drop-shadow(0 3px 0 rgba(0,0,0,.25)); }
+#fx .fx-reazione .fx-bolla { background: #fff; color: var(--fx-outline); border: 3px solid var(--fx-outline); border-radius: 14px; padding: 2px 9px; font-weight: 700; font-size: 13px; white-space: nowrap; box-shadow: 0 3px 0 var(--fx-outline); margin-top: 2px; }
+@keyframes fx-reazione { 0% { transform: translate(-50%, -80%) scale(0); opacity: 0; } 12% { transform: translate(-50%, -100%) scale(1.2); opacity: 1; } 22% { transform: translate(-50%, -100%) scale(1); } 80% { opacity: 1; } 100% { transform: translate(-50%, -130%) scale(1); opacity: 0; } }
+
+/* ---------- Piccola (velocissima) ---------- */
+#fx .fx-linee-velocita { position: fixed; inset: -20%; z-index: 66;
+  background: repeating-conic-gradient(from 0deg at var(--x) var(--y), rgba(255,255,255,.0) 0deg 4deg, rgba(255,255,255,.85) 4deg 5deg, rgba(255,255,255,0) 5deg 11deg);
+  -webkit-mask: radial-gradient(circle at var(--x) var(--y), transparent 0 90px, #000 260px); mask: radial-gradient(circle at var(--x) var(--y), transparent 0 90px, #000 260px);
+  animation: fx-lineevel .55s ease-out forwards; }
+@keyframes fx-lineevel { 0% { opacity: 0; transform: scale(1.6); } 25% { opacity: 1; } 100% { opacity: 0; transform: scale(1); } }
+#fx .fx-banner-zip { position: fixed; top: 38%; left: 0; z-index: 70; font-weight: 800; font-size: clamp(42px, 9vw, 110px); color: var(--fx-sky); white-space: nowrap; font-style: italic;
+  -webkit-text-stroke: 4px var(--fx-outline); paint-order: stroke fill; text-shadow: -30px 0 0 rgba(90,209,255,.45), -60px 0 0 rgba(90,209,255,.25), -90px 0 0 rgba(90,209,255,.12);
+  animation: fx-zip 1.05s cubic-bezier(.1,.9,.1,1) forwards; }
+#fx .fx-banner-zip small { display: block; font-size: 28%; color: #fff; -webkit-text-stroke: 1px var(--fx-outline); text-shadow: none; font-style: normal; }
+@keyframes fx-zip { 0% { transform: translateX(-110%) skewX(-30deg); } 22% { transform: translateX(calc(50vw - 50%)) skewX(-30deg); } 30% { transform: translateX(calc(50vw - 50%)) skewX(8deg); } 38%, 72% { transform: translateX(calc(50vw - 50%)) skewX(0); }
+  100% { transform: translateX(120vw) skewX(-35deg); } }
+#fx .fx-saetta { position: fixed; z-index: 67; height: 6px; transform-origin: 0 50%; background: linear-gradient(90deg, rgba(255,255,255,0), #fff 40%, var(--fx-sky)); border-radius: 6px; box-shadow: 0 0 14px var(--fx-sky), 0 0 30px #fff; animation: fx-saetta .35s ease-out forwards; }
+@keyframes fx-saetta { 0% { clip-path: inset(0 100% 0 0); opacity: 1; } 50% { clip-path: inset(0 0 0 0); opacity: 1; } 100% { clip-path: inset(0 0 0 100%); opacity: 0; } }
+#fx .fx-sbuffo { position: fixed; z-index: 66; width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 2px solid var(--fx-outline); animation: fx-sbuffo .5s ease-out forwards; }
+@keyframes fx-sbuffo { to { transform: translate(var(--dx), var(--dy)) scale(.2); opacity: 0; } }
+
+/* ---------- Grande (pesantissima) ---------- */
+#fx .fx-vignetta { position: fixed; inset: 0; z-index: 61; background: radial-gradient(ellipse at center, rgba(0,0,0,0) 30%, rgba(20,0,0,.75) 100%); animation: fx-vignetta 2.6s ease-in-out forwards; }
+@keyframes fx-vignetta { 0% { opacity: 0; } 15%, 75% { opacity: 1; } 100% { opacity: 0; } }
+#fx .fx-macigno { position: fixed; z-index: 68; filter: drop-shadow(0 30px 25px rgba(0,0,0,.6)); }
+#fx .fx-macigno .fx-carta { width: 100%; height: 100%; border: 4px solid var(--fx-outline); }
+#fx .fx-ombra-impatto { position: fixed; z-index: 62; border-radius: 50%; background: radial-gradient(ellipse, rgba(0,0,0,.55), rgba(0,0,0,0) 70%); transform: translate(-50%, -50%) scale(.2); animation: fx-ombra .62s ease-in forwards; }
+@keyframes fx-ombra { to { transform: translate(-50%, -50%) scale(1.3); } }
+#fx .fx-crepe { position: fixed; z-index: 63; transform: translate(-50%, -50%); animation: fx-crepe 2.8s ease-out forwards; overflow: visible; }
+#fx .fx-crepe path { stroke: #142a14; stroke-width: 5; fill: none; stroke-linecap: round; stroke-dasharray: 400; stroke-dashoffset: 400; animation: fx-crepatraccia .25s ease-out forwards; }
+@keyframes fx-crepatraccia { to { stroke-dashoffset: 0; } }
+@keyframes fx-crepe { 0%, 75% { opacity: .9; } 100% { opacity: 0; } }
+#fx .fx-polvere { position: fixed; z-index: 64; width: 40px; height: 40px; border-radius: 50%; background: radial-gradient(circle, rgba(225,205,170,.95), rgba(170,140,100,.0) 70%); transform: translate(-50%, -50%); animation: fx-polvere 1.3s ease-out forwards; }
+@keyframes fx-polvere { to { transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(var(--s)); opacity: 0; } }
+#fx .fx-banner-pesante { position: fixed; left: 50%; top: 30%; z-index: 70; font-weight: 800; font-size: clamp(56px, 12vw, 150px); color: #ffcc33; white-space: nowrap; letter-spacing: .02em; text-align: center;
+  -webkit-text-stroke: 6px var(--fx-outline); paint-order: stroke fill; text-shadow: 0 10px 0 var(--fx-outline), 0 18px 30px rgba(0,0,0,.6);
+  transform: translate(-50%, -260%); animation: fx-pesante 2.3s cubic-bezier(.55,0,1,.45) forwards; }
+#fx .fx-banner-pesante small { display: block; text-align: center; font-size: 22%; color: #fff; -webkit-text-stroke: 2px var(--fx-outline); text-shadow: 0 3px 0 var(--fx-outline); }
+@keyframes fx-pesante { 0% { transform: translate(-50%, -260%) scale(1.3); } 26% { transform: translate(-50%, -50%) scale(1.15, .8); animation-timing-function: ease-out; } 34% { transform: translate(-50%, -62%) scale(.95, 1.05); } 42% { transform: translate(-50%, -50%) scale(1); } 82% { opacity: 1; transform: translate(-50%, -50%) scale(1); } 100% { opacity: 0; transform: translate(-50%, 40%) scale(1) rotate(6deg); } }
+
+/* ---------- coriandoli, flash, raggi, onda d'urto, buio, fulmini ---------- */
+#fx .fx-coriandolo { position: fixed; top: -20px; z-index: 72; width: 10px; height: 16px; animation: fx-cade var(--t, 2.6s) linear forwards; }
+@keyframes fx-cade { to { transform: translate(var(--dx), 110vh) rotate(var(--r)); } }
+#fx .fx-flash { position: fixed; inset: 0; z-index: 69; background: var(--col, #fff); animation: fx-flash var(--t, .35s) ease-out forwards; }
+@keyframes fx-flash { 0% { opacity: .85; } 100% { opacity: 0; } }
+#fx .fx-raggi { position: fixed; left: 50%; top: 45%; width: 220vmax; height: 220vmax; z-index: 63; transform: translate(-50%, -50%);
+  background: repeating-conic-gradient(var(--col, rgba(255,79,163,.35)) 0deg 9deg, transparent 9deg 18deg); animation: fx-raggi var(--t, 2.6s) linear forwards; border-radius: 50%; -webkit-mask: radial-gradient(circle, #000 20%, transparent 60%); mask: radial-gradient(circle, #000 20%, transparent 60%); }
+@keyframes fx-raggi { 0% { opacity: 0; transform: translate(-50%, -50%) rotate(0); } 15% { opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%, -50%) rotate(120deg); } }
+#fx .fx-onda { position: fixed; z-index: 68; width: 40px; height: 40px; border-radius: 50%; border: 10px solid var(--col, #fff); transform: translate(-50%, -50%) scale(.2); animation: fx-onda .9s ease-out forwards; }
+@keyframes fx-onda { to { transform: translate(-50%, -50%) scale(var(--s, 30)); opacity: 0; border-width: 1px; } }
+#fx .fx-buio { position: fixed; inset: 0; z-index: 61; background: radial-gradient(ellipse at center, rgba(30,0,40,.55), rgba(0,0,0,.92)); animation: fx-buio var(--t, 5s) ease-in-out forwards; }
+@keyframes fx-buio { 0% { opacity: 0; } 8%, 85% { opacity: 1; } 100% { opacity: 0; } }
+#fx .fx-fulmine { position: fixed; z-index: 66; animation: fx-fulmine .5s steps(2) forwards; filter: drop-shadow(0 0 12px #c9b8ff) drop-shadow(0 0 30px #fff); }
+#fx .fx-fulmine path { stroke: #fff; stroke-width: 5; fill: none; stroke-linejoin: bevel; }
+@keyframes fx-fulmine { 0%, 40% { opacity: 1; } 50% { opacity: 0; } 60% { opacity: 1; } 100% { opacity: 0; } }
+
+/* ---------- carte giganti (Bazzica 5 e 7) e pioggia di carte ---------- */
+#fx .fx-carte-giganti { position: fixed; left: 50%; top: 60%; z-index: 71; display: flex; gap: 2vw; transform: translate(-50%, -50%); }
+#fx .fx-carte-giganti .fx-carta { width: clamp(90px, 14vw, 190px); height: auto; border: 5px solid var(--fx-outline); box-shadow: 0 10px 0 var(--fx-outline), 0 0 40px rgba(255,255,255,.6); animation: fx-gigante var(--t, 2.6s) cubic-bezier(.2,1.4,.4,1) forwards; }
+#fx .fx-carte-giganti .fx-carta:nth-child(1) { --r0: -40deg; --r1: -10deg; animation-delay: 0s; }
+#fx .fx-carte-giganti .fx-carta:nth-child(2) { --r0: 30deg; --r1: 0deg; animation-delay: .12s; }
+#fx .fx-carte-giganti .fx-carta:nth-child(3) { --r0: 60deg; --r1: 10deg; animation-delay: .24s; }
+@keyframes fx-gigante { 0% { transform: translateY(-120vh) rotate(var(--r0)) scale(1.4); opacity: 0; } 20% { transform: translateY(0) rotate(var(--r1)) scale(1); opacity: 1; } 80% { opacity: 1; transform: translateY(0) rotate(var(--r1)) scale(1.05); } 100% { opacity: 0; transform: translateY(0) rotate(var(--r1)) scale(.6); } }
+#fx .fx-carte-giganti.fx-vortice .fx-carta { animation-name: fx-vortice; }
+@keyframes fx-vortice { 0% { transform: scale(0) rotate(-1080deg); opacity: 0; } 30% { transform: scale(1.25) rotate(var(--r1)); opacity: 1; } 40% { transform: scale(1) rotate(var(--r1)); } 85% { transform: scale(1.08) rotate(var(--r1)); opacity: 1; } 100% { transform: scale(3) rotate(var(--r1)); opacity: 0; } }
+#fx .fx-pioggia-carta { position: fixed; top: -160px; z-index: 64; width: 60px; aspect-ratio: 240 / 400; animation: fx-cade var(--t, 1.8s) cubic-bezier(.5,0,1,1) forwards; }
+#fx .fx-pioggia-carta.fx-piac { aspect-ratio: 0.565; }
+#fx .fx-pioggia-carta .fx-carta { width: 100%; height: 100%; }
+
+/* ---------- Napola e Napoleone ---------- */
+#fx .fx-parata-denari { position: fixed; left: 50%; top: 64%; z-index: 72; transform: translate(-50%, -50%); width: min(92vw, 1000px); height: 38vh; }
+#fx .fx-parata-denari .fx-carta { position: absolute; left: 0; top: 0; width: clamp(54px, 8vw, 110px); height: auto; border: 4px solid var(--fx-outline); box-shadow: 0 6px 0 var(--fx-outline), 0 0 26px rgba(255,215,0,.9);
+  opacity: 0; transform: translateY(80vh) rotate(0) scale(.5); transition: transform .55s cubic-bezier(.2,1.5,.4,1), opacity .2s; }
+#fx .fx-parata-denari .fx-carta.fx-in { opacity: 1; }
+#fx .fx-corona { position: fixed; left: 50%; top: 8%; z-index: 73; font-size: clamp(60px, 11vw, 140px); transform: translate(-50%, -50%); animation: fx-corona 3.5s cubic-bezier(.2,1.6,.4,1) forwards; filter: drop-shadow(0 6px 0 var(--fx-outline)); }
+@keyframes fx-corona { 0% { transform: translate(-50%, -300%) rotate(-30deg); } 20% { transform: translate(-50%, -50%) rotate(8deg) scale(1.2); } 30% { transform: translate(-50%, -50%) rotate(-4deg) scale(1); } 85% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%, -50%) scale(1.4); } }
+#fx .fx-fuoco-artificio { position: fixed; z-index: 70; width: 6px; height: 6px; border-radius: 50%; animation: fx-fuocoart 1.2s cubic-bezier(.1,.8,.3,1) forwards; }
+@keyframes fx-fuocoart { 0% { transform: translate(0, 0); opacity: 1; } 100% { transform: translate(var(--dx), calc(var(--dy) + 60px)); opacity: 0; } }
+
+/* ---------- Scopa: spazzola e lettere ---------- */
+#fx .fx-spazzola { position: fixed; z-index: 69; font-size: clamp(56px, 10vh, 96px); transform: translate(-50%, -50%);
+  filter: drop-shadow(0 6px 0 rgba(0,0,0,.35)); animation: fx-spazzola linear forwards; }
+@keyframes fx-spazzola {
+  0% { transform: translate(-50%, -50%) rotate(-35deg); }
+  20% { transform: translate(calc(-50% + var(--dist) * .2), -40%) rotate(-10deg); }
+  40% { transform: translate(calc(-50% + var(--dist) * .4), -55%) rotate(-40deg); }
+  60% { transform: translate(calc(-50% + var(--dist) * .6), -40%) rotate(-10deg); }
+  80% { transform: translate(calc(-50% + var(--dist) * .8), -55%) rotate(-40deg); }
+  100% { transform: translate(calc(-50% + var(--dist)), -50%) rotate(-15deg); opacity: .4; } }
+#fx .fx-polverina { position: fixed; z-index: 68; width: 10px; height: 10px; border-radius: 50%; background: rgba(255, 245, 210, .9); animation: fx-polverina .65s ease-out forwards; }
+@keyframes fx-polverina { to { transform: translate(var(--dx), var(--dy)) scale(2.2); opacity: 0; } }
+#fx .fx-banner-lettere { position: fixed; left: 50%; top: 40%; z-index: 74; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; width: max-content;
+  font-weight: 800; font-size: clamp(54px, 11vw, 130px); color: var(--fx-gold); -webkit-text-stroke: 5px var(--fx-outline); paint-order: stroke fill; animation: fx-lettere-via 1.9s ease-in forwards; white-space: nowrap; }
+#fx .fx-banner-lettere.fx-grossa { font-size: clamp(64px, 14vw, 170px); }
+#fx .fx-banner-lettere .fx-lettera { display: inline-block; text-shadow: 0 7px 0 var(--fx-outline), 0 0 28px rgba(255,210,63,.8); transform: translateY(-120vh) rotate(var(--rot)); animation: fx-lettera .55s cubic-bezier(.2,1.6,.4,1) forwards; }
+#fx .fx-banner-lettere .fx-parola { display: flex; }
+#fx .fx-banner-lettere small { text-align: center; font-size: 24%; color: #fff; -webkit-text-stroke: 2px var(--fx-outline); text-shadow: 0 3px 0 var(--fx-outline); }
+@keyframes fx-lettera { to { transform: translateY(0) rotate(var(--rot)); } }
+@keyframes fx-lettere-via { 0%, 80% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%, -65%); } }
+
+/* ---------- prese buone: sette bello, re bello, sette ---------- */
+#fx .fx-gloria { position: fixed; left: 50%; top: 46%; z-index: 72; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center;
+  animation: fx-gloria-entra .45s cubic-bezier(.2,1.6,.4,1) both; }
+#fx .fx-gloria .fx-carta { width: clamp(80px, 12vh, 130px); height: auto; border: 4px solid var(--fx-outline); box-shadow: 0 8px 0 var(--fx-outline); position: relative; z-index: 2; animation: fx-gloria-dondola .9s ease-in-out infinite alternate; }
+#fx .fx-gloria-alone { position: absolute; left: 50%; top: 42%; width: 300px; height: 300px; transform: translate(-50%, -50%); border-radius: 50%; z-index: 1;
+  background: repeating-conic-gradient(rgba(255,210,63,.55) 0 10deg, transparent 10deg 20deg); -webkit-mask: radial-gradient(circle, #000 25%, transparent 68%); mask: radial-gradient(circle, #000 25%, transparent 68%); animation: fx-gira 3s linear infinite; }
+#fx .fx-gloria.fx-primiera .fx-gloria-alone { width: 210px; height: 210px; background: repeating-conic-gradient(rgba(255,138,92,.45) 0 12deg, transparent 12deg 24deg); }
+#fx .fx-gloria.fx-re .fx-gloria-alone { background: repeating-conic-gradient(rgba(178,141,255,.55) 0 10deg, transparent 10deg 20deg); }
+#fx .fx-gloria-testo { margin-top: 10px; z-index: 3; font-weight: 800; font-size: clamp(26px, 4.5vh, 44px); color: #fff3a0; -webkit-text-stroke: 3px var(--fx-outline); paint-order: stroke fill; text-shadow: 0 4px 0 var(--fx-outline); white-space: nowrap; }
+#fx .fx-gloria.fx-primiera .fx-gloria-testo { color: #ffb38a; font-size: clamp(20px, 3.4vh, 32px); }
+#fx .fx-gloria-corona { position: absolute; top: -34px; z-index: 3; font-size: 54px; animation: fx-corona-cade .5s .15s cubic-bezier(.2,1.6,.4,1) both; filter: drop-shadow(0 4px 0 var(--fx-outline)); }
+@keyframes fx-gloria-entra { from { transform: translate(-50%, -50%) scale(0) rotate(-20deg); } to { transform: translate(-50%, -50%) scale(1) rotate(0); } }
+@keyframes fx-gloria-dondola { from { transform: rotate(-4deg) scale(1); } to { transform: rotate(4deg) scale(1.06); } }
+@keyframes fx-corona-cade { from { transform: translateY(-60px) rotate(-30deg); opacity: 0; } to { transform: translateY(0) rotate(-8deg); opacity: 1; } }
+@keyframes fx-gira { to { transform: translate(-50%, -50%) rotate(360deg); } }
+
+/* ---------- "Striscia" ---------- */
+#fx .fx-carta-strisciata { position: fixed; z-index: 66; width: clamp(40px, 6vh, 60px); aspect-ratio: 240 / 400; transform: translate(-50%, -50%);
+  animation: fx-strisciata 1.2s ease-in-out forwards; filter: drop-shadow(0 4px 2px rgba(0,0,0,.4)); }
+#fx .fx-carta-strisciata.fx-piac { aspect-ratio: 0.565; }
+#fx .fx-carta-strisciata .fx-carta { width: 100%; height: 100%; }
+@keyframes fx-strisciata {
+  0% { opacity: 0; transform: translate(-50%, -50%) rotate(-20deg) scale(.6); }
+  12% { opacity: 1; transform: translate(-50%, -50%) rotate(-12deg) scale(1); }
+  25% { transform: translate(-20%, -50%) rotate(-6deg); } 38% { transform: translate(-80%, -50%) rotate(-16deg); }
+  51% { transform: translate(-20%, -50%) rotate(-6deg); } 64% { transform: translate(-80%, -50%) rotate(-16deg); }
+  77% { transform: translate(-20%, -50%) rotate(-6deg); }
+  90% { opacity: 1; transform: translate(-50%, -50%) rotate(-12deg); }
+  100% { opacity: 0; transform: translate(-50%, -50%) rotate(-12deg) scale(.9); } }
+
+/* ---------- movimento ridotto: niente scosse (il JS salta già flash, crepe, raggi...) ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .fx-scuoti, .fx-terremoto, .fx-arrabbiato, .fx-felice, .fx-spazzato { animation: none !important; }
+  #fx .fx-alone-fuoco, #fx .fx-gloria-alone, #fx .fx-gloria .fx-carta { animation: none; }
+  #fx .fx-banner.fx-b7 { animation: fx-banner 3.2s cubic-bezier(.2,1.4,.4,1) forwards; }
+}
