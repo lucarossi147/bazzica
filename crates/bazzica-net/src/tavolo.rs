@@ -1,0 +1,386 @@
+//! The replicated table: lobby, seats, settings and the game in progress.
+//!
+//! Every peer holds a [`Tavolo`] and applies the same ordered [`Voce`] log to it, so all
+//! replicas stay identical. [`Tavolo::impronta`] is the hash peers compare to detect drift.
+
+use std::collections::BTreeSet;
+
+use bazzica_core::game::{Evento, NOMI_SQUADRE};
+use bazzica_core::{Azione, Fase, GameState, RulesConfig, Seat, Variante};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Stable player identity, chosen by the device and kept across reconnections.
+pub type IdGiocatore = String;
+
+pub const NOMI_BOT: [&str; 4] = ["Bot Nord", "Bot Est", "Bot Sud", "Bot Ovest"];
+pub const AVATAR: [&str; 12] = [
+    "🦊", "🐻", "🐸", "🦁", "🐼", "🐵", "🦉", "🐙", "🐱", "🐲", "🐢", "🦭",
+];
+pub const AVATAR_BOT: &str = "🤖";
+pub const FRASI: [&str; 10] = [
+    "Veloce?!?",
+    "Di#p?@co",
+    "Praticamente pari",
+    "Che culo...",
+    "Aperta come...",
+    "Faccio una giocata un po' particolare",
+    "Stai giocando con paura",
+    "Sei MATTO?!",
+    "Ma hai tutti gli assi??",
+    "CHE CULO",
+];
+pub const MAX_NOME: usize = 24;
+pub const MAX_TIMER: u32 = 300;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Partecipante {
+    pub id: IdGiocatore,
+    pub nome: String,
+    pub avatar: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "tipo", rename_all = "snake_case")]
+pub enum Posto {
+    Umano { id: IdGiocatore },
+    Bot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Impostazioni {
+    pub nome: String,
+    pub variante: Variante,
+    pub margherita: bool,
+    /// Seconds for the Heisenberg exchange; 0 disables the timer.
+    pub timer_scambio: u32,
+    /// Seconds for each human play; 0 disables the timer.
+    pub timer_giocata: u32,
+    pub squadre: [String; 2],
+}
+
+impl Default for Impostazioni {
+    fn default() -> Self {
+        Impostazioni {
+            nome: "Tavolo".into(),
+            variante: Variante::Vanilla,
+            margherita: false,
+            timer_scambio: 30,
+            timer_giocata: 15,
+            squadre: NOMI_SQUADRE.map(String::from),
+        }
+    }
+}
+
+impl Impostazioni {
+    /// Clamps free-text fields and durations to sane bounds.
+    pub fn normalizzate(mut self) -> Self {
+        self.nome = taglia(&self.nome, 40, "Tavolo");
+        self.timer_scambio = self.timer_scambio.min(MAX_TIMER);
+        self.timer_giocata = self.timer_giocata.min(MAX_TIMER);
+        for (i, s) in self.squadre.iter_mut().enumerate() {
+            *s = taglia(s, 20, NOMI_SQUADRE[i]);
+        }
+        self
+    }
+
+    pub fn regole(&self) -> RulesConfig {
+        RulesConfig::preset(self.variante, self.margherita)
+    }
+}
+
+pub fn taglia(s: &str, max: usize, predefinito: &str) -> String {
+    let t: String = s.trim().chars().take(max).collect();
+    if t.is_empty() { predefinito.into() } else { t }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatoTavolo {
+    Lobby,
+    InCorso,
+    Finita,
+}
+
+/// Which timer expired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TipoTimer {
+    Scambio,
+    Giocata,
+}
+
+/// One entry of the replicated log. Only the sequencer (host) creates entries; it has already
+/// checked who asked for it, so applying an entry only checks game legality.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "voce", rename_all = "snake_case")]
+pub enum Voce {
+    /// A participant joins the table (or updates name/avatar).
+    Entra(Partecipante),
+    Siedi {
+        id: IdGiocatore,
+        posto: Seat,
+    },
+    Alzati {
+        posto: Seat,
+    },
+    Bot {
+        posto: Seat,
+        aggiungi: bool,
+    },
+    Imposta(Impostazioni),
+    Avvia {
+        seed: u64,
+    },
+    /// A game action: from a human, a bot (chosen by the host) or the end-of-hand system step.
+    Azione(Azione),
+    /// A turn timer expired: the listed actions were chosen on the player's behalf.
+    Scaduto {
+        timer: TipoTimer,
+        seat: Option<Seat>,
+        azioni: Vec<Azione>,
+    },
+    /// A human acknowledged the end-of-hand summary.
+    Prosegui {
+        id: IdGiocatore,
+    },
+    Termina {
+        da: IdGiocatore,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Errore(pub String);
+
+impl std::fmt::Display for Errore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Errore {}
+
+fn errore<T>(m: &str) -> Result<T, Errore> {
+    Err(Errore(m.into()))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tavolo {
+    pub impostazioni: Impostazioni,
+    /// Everyone who ever joined, in join order. The first connected one is the host.
+    pub partecipanti: Vec<Partecipante>,
+    pub posti: [Option<Posto>; 4],
+    pub stato: StatoTavolo,
+    pub partita: Option<GameState>,
+    /// Humans who acknowledged the current end-of-hand summary.
+    pub ack: BTreeSet<IdGiocatore>,
+    pub terminata_da: Option<IdGiocatore>,
+    /// Number of log entries applied so far.
+    pub n: u64,
+}
+
+impl Tavolo {
+    pub fn nuovo(creatore: Partecipante, impostazioni: Impostazioni) -> Tavolo {
+        Tavolo {
+            impostazioni: impostazioni.normalizzate(),
+            partecipanti: vec![creatore],
+            posti: Default::default(),
+            stato: StatoTavolo::Lobby,
+            partita: None,
+            ack: BTreeSet::new(),
+            terminata_da: None,
+            n: 0,
+        }
+    }
+
+    /// Short hash of the whole replica, compared by peers after every entry.
+    pub fn impronta(&self) -> String {
+        let json = serde_json::to_vec(self).expect("serializable");
+        let h = Sha256::digest(&json);
+        h[..8].iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    pub fn partecipante(&self, id: &str) -> Option<&Partecipante> {
+        self.partecipanti.iter().find(|p| p.id == id)
+    }
+
+    pub fn creatore(&self) -> &IdGiocatore {
+        &self.partecipanti[0].id
+    }
+
+    /// Seats controlled by `id`.
+    pub fn posti_di(&self, id: &str) -> Vec<Seat> {
+        (0..4)
+            .filter(
+                |&s| matches!(&self.posti[usize::from(s)], Some(Posto::Umano { id: x }) if x == id),
+            )
+            .collect()
+    }
+
+    pub fn umani(&self) -> BTreeSet<IdGiocatore> {
+        self.posti
+            .iter()
+            .filter_map(|p| match p {
+                Some(Posto::Umano { id }) => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn e_bot(&self, seat: Seat) -> bool {
+        matches!(self.posti[usize::from(seat)], Some(Posto::Bot))
+    }
+
+    /// Display name of a seat.
+    pub fn nome_posto(&self, seat: Seat) -> String {
+        match &self.posti[usize::from(seat)] {
+            Some(Posto::Umano { id }) => self
+                .partecipante(id)
+                .map_or_else(|| "?".into(), |p| p.nome.clone()),
+            Some(Posto::Bot) => NOMI_BOT[usize::from(seat)].into(),
+            None => "—".into(),
+        }
+    }
+
+    fn in_lobby(&mut self) -> Result<(), Errore> {
+        match self.stato {
+            StatoTavolo::InCorso => errore("La partita è già iniziata"),
+            StatoTavolo::Finita => {
+                self.stato = StatoTavolo::Lobby;
+                self.partita = None;
+                self.terminata_da = None;
+                Ok(())
+            }
+            StatoTavolo::Lobby => Ok(()),
+        }
+    }
+
+    fn partita_mut(&mut self) -> Result<&mut GameState, Errore> {
+        match (&self.stato, self.partita.as_mut()) {
+            (StatoTavolo::InCorso, Some(p)) => Ok(p),
+            _ => errore("Nessuna partita in corso"),
+        }
+    }
+
+    /// Applies one log entry. On error the table is left unchanged.
+    pub fn applica(&mut self, voce: &Voce) -> Result<Vec<Evento>, Errore> {
+        let mut copia = self.clone();
+        let eventi = copia.applica_interno(voce)?;
+        copia.n += 1;
+        *self = copia;
+        Ok(eventi)
+    }
+
+    fn applica_interno(&mut self, voce: &Voce) -> Result<Vec<Evento>, Errore> {
+        match voce {
+            Voce::Entra(p) => {
+                let p = Partecipante {
+                    id: p.id.clone(),
+                    nome: taglia(&p.nome, MAX_NOME, "Giocatore"),
+                    avatar: if AVATAR.contains(&p.avatar.as_str()) {
+                        p.avatar.clone()
+                    } else {
+                        AVATAR[self.partecipanti.len() % AVATAR.len()].into()
+                    },
+                };
+                match self.partecipanti.iter_mut().find(|x| x.id == p.id) {
+                    Some(x) => *x = p,
+                    None => self.partecipanti.push(p),
+                }
+                Ok(vec![])
+            }
+            Voce::Siedi { id, posto } => {
+                self.in_lobby()?;
+                if self.partecipante(id).is_none() {
+                    return errore("Giocatore sconosciuto");
+                }
+                let p = self.posto_mut(*posto)?;
+                if p.is_some() {
+                    return errore("Posto occupato");
+                }
+                *p = Some(Posto::Umano { id: id.clone() });
+                Ok(vec![])
+            }
+            Voce::Alzati { posto } => {
+                self.in_lobby()?;
+                *self.posto_mut(*posto)? = None;
+                Ok(vec![])
+            }
+            Voce::Bot { posto, aggiungi } => {
+                self.in_lobby()?;
+                let p = self.posto_mut(*posto)?;
+                if *aggiungi {
+                    if p.is_some() {
+                        return errore("Posto occupato");
+                    }
+                    *p = Some(Posto::Bot);
+                } else if *p == Some(Posto::Bot) {
+                    *p = None;
+                }
+                Ok(vec![])
+            }
+            Voce::Imposta(imp) => {
+                self.in_lobby()?;
+                self.impostazioni = imp.clone().normalizzate();
+                Ok(vec![])
+            }
+            Voce::Avvia { seed } => {
+                self.in_lobby()?;
+                if self.posti.iter().any(Option::is_none) {
+                    return errore("Servono 4 giocatori (umani o bot)");
+                }
+                let (st, eventi) = GameState::new_game(self.impostazioni.regole(), *seed, None);
+                self.partita = Some(st);
+                self.stato = StatoTavolo::InCorso;
+                self.ack.clear();
+                self.terminata_da = None;
+                Ok(eventi)
+            }
+            Voce::Azione(a) => {
+                let st = self.partita_mut()?;
+                let eventi = st.apply(a).map_err(|e| Errore(e.0))?;
+                self.dopo_azione();
+                Ok(eventi)
+            }
+            Voce::Scaduto { azioni, .. } => {
+                let st = self.partita_mut()?;
+                let mut eventi = vec![];
+                for a in azioni {
+                    eventi.extend(st.apply(a).map_err(|e| Errore(e.0))?);
+                }
+                self.dopo_azione();
+                Ok(eventi)
+            }
+            Voce::Prosegui { id } => {
+                let st = self.partita_mut()?;
+                if st.fase != Fase::FineMano {
+                    return errore("Non è la fine di una mano");
+                }
+                self.ack.insert(id.clone());
+                Ok(vec![])
+            }
+            Voce::Termina { da } => {
+                self.partita_mut()?;
+                self.stato = StatoTavolo::Finita;
+                self.terminata_da = Some(da.clone());
+                Ok(vec![])
+            }
+        }
+    }
+
+    fn posto_mut(&mut self, posto: Seat) -> Result<&mut Option<Posto>, Errore> {
+        self.posti
+            .get_mut(usize::from(posto))
+            .ok_or_else(|| Errore("Posto inesistente".into()))
+    }
+
+    fn dopo_azione(&mut self) {
+        let fase = self.partita.as_ref().map(|p| p.fase);
+        if fase != Some(Fase::FineMano) {
+            self.ack.clear();
+        }
+        if fase == Some(Fase::FinePartita) {
+            self.stato = StatoTavolo::Finita;
+        }
+    }
+}

@@ -19,6 +19,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bazzica-net"
+version = "0.1.0"
+dependencies = [
+ "bazzica-core",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

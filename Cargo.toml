@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bazzica-core"]
+members = ["crates/bazzica-core", "crates/bazzica-net"]
 
 [workspace.package]
 edition = "2024"
@@ -11,6 +11,8 @@ repository = "https://github.com/lucarossi147/bazzica"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+bazzica-core = { path = "crates/bazzica-core" }
 
 # The trace conformance suite replays ~35k game steps; keep tests fast without a release build.
 [profile.test]
