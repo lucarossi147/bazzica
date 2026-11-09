@@ -475,6 +475,22 @@ pub struct Osservazione {
     pub vincitore: Option<Vincitore>,
 }
 
+/// Plays per turn: each of the 4 players plays the 3 cards dealt.
+pub const GIOCATE_PER_TURNO: usize = 12;
+
+impl Osservazione {
+    /// Plays of the current turn, oldest first.
+    pub fn giocate_turno(&self) -> &[GiocataMano] {
+        let da = usize::from(self.turno.saturating_sub(1)) * GIOCATE_PER_TURNO;
+        self.giocate_mano.get(da..).unwrap_or_default()
+    }
+
+    /// The most recent play of `seat` in the current turn.
+    pub fn ultima_di(&self, seat: Seat) -> Option<&GiocataMano> {
+        self.giocate_turno().iter().rev().find(|g| g.0 == seat)
+    }
+}
+
 // --------------------------------------------------------------------------- state
 
 /// Full game state. Serializes to the same JSON as `stato_json` in `tools/esporta_tracce.py`.

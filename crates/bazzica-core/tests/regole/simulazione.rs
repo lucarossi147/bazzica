@@ -25,6 +25,17 @@ fn controlla_invarianti(st: &GameState, events: &[Evento]) {
         .collect();
     tutte.sort();
     assert_eq!(tutte, *MAZZO, "cards not conserved");
+    // the current turn's plays are exactly the cards no longer in hand
+    if st.fase == Fase::Gioco {
+        let obs = st.observation(0);
+        let in_mano: usize = st.mani.iter().map(Vec::len).sum();
+        assert_eq!(obs.giocate_turno().len(), 12 - in_mano);
+        for s in 0..4u8 {
+            let mie = obs.giocate_turno().iter().filter(|g| g.0 == s).count();
+            assert_eq!(mie, 3 - st.mani[usize::from(s)].len());
+            assert_eq!(obs.ultima_di(s).is_some(), mie > 0);
+        }
+    }
     for e in events {
         match &e.dati {
             DatiEvento::FineMano { riepilogo } => {
