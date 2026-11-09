@@ -1574,7 +1574,7 @@ fn muta(v: &mut serde_json::Value, rng: &mut bazzica_core::Mulberry32) {
             2 => Value::from(u64::MAX),
             3 => Value::from(-1),
             4 => Value::from("?"),
-            5 => Value::Bool(rng.next_u32() % 2 == 0),
+            5 => Value::Bool(rng.next_u32().is_multiple_of(2)),
             6 => Value::Array(vec![]),
             _ => Value::from(rng.next_u32() % 50),
         };
@@ -1627,7 +1627,12 @@ fn messaggi_mutati_non_fanno_danni() {
         per_tipo.entry(tipo).or_default().push(v);
     }
     let tipi: Vec<Vec<serde_json::Value>> = per_tipo.into_values().collect();
-    let mut rng = bazzica_core::Mulberry32::new(2026);
+    // fixed in CI; `SEME_FUZZ=<n>` explores other seeds
+    let seme = std::env::var("SEME_FUZZ")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2026);
+    let mut rng = bazzica_core::Mulberry32::new(seme);
     let mut consegnati = 0;
     for _ in 0..1_000_000 {
         if consegnati == 10_000 {

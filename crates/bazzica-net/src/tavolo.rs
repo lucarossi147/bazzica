@@ -326,6 +326,19 @@ impl Tavolo {
         }
     }
 
+    /// Checks a replica received from another peer before adopting it (it must not be able
+    /// to crash this node or its UI later).
+    pub fn valida(&self) -> Result<(), Errore> {
+        if self.partecipanti.is_empty() {
+            return errore("Tavolo senza partecipanti");
+        }
+        match (&self.stato, &self.partita) {
+            (StatoTavolo::InCorso, None) => errore("Partita in corso mancante"),
+            (_, Some(st)) => st.valida().map_err(Errore),
+            _ => Ok(()),
+        }
+    }
+
     /// The table after one log entry, leaving `self` untouched.
     pub fn applicata(&self, voce: &Voce) -> Result<(Tavolo, Vec<Evento>), Errore> {
         let mut copia = self.clone();
@@ -342,6 +355,15 @@ impl Tavolo {
     }
 
     fn applica_interno(&mut self, voce: &Voce) -> Result<Vec<Evento>, Errore> {
+        // actions name seats: the engine indexes by them, so they must exist
+        let azioni: &[Azione] = match voce {
+            Voce::Azione(a) => std::slice::from_ref(a),
+            Voce::Scaduto { azioni, .. } => azioni,
+            _ => &[],
+        };
+        if azioni.iter().any(|a| a.seat().is_some_and(|s| s > 3)) {
+            return errore("Posto inesistente");
+        }
         match voce {
             Voce::Entra(p) => {
                 let p = Partecipante {
@@ -436,7 +458,8 @@ impl Tavolo {
             Voce::Riprendi { posto, id } => {
                 self.partita_mut()?;
                 let i = usize::from(*posto);
-                if self.sostituiti.get(i) != Some(&Some(id.clone())) || !self.e_bot(*posto) {
+                let bot = matches!(self.posti.get(i), Some(Some(Posto::Bot)));
+                if self.sostituiti.get(i) != Some(&Some(id.clone())) || !bot {
                     return errore("Questo posto non era tuo");
                 }
                 self.posti[i] = Some(Posto::Umano { id: id.clone() });

@@ -10,6 +10,13 @@
 //! If the host leaves, the first connected participant in join order takes over with a higher
 //! `epoca`; peers that are ahead hand it their replica, peers that are behind catch up.
 //!
+//! Untrusted input: anything decoded from the network may be corrupt or forged, and must not
+//! crash the node or its UI. Snapshots are checked ([`Tavolo::valida`]: every card once, seats
+//! in range) before adoption; entries naming a seat that does not exist are refused; wire seats
+//! are checked before any arithmetic ([`posto`]); a peer holding a replica follows a host claim,
+//! an entry or a snapshot of a new epoch only from a participant of the table and at most
+//! `SALTO_MAX_EPOCA` epochs ahead. Identities are still self-declared (messages are not signed).
+//!
 //! Requests: a follower keeps each request until the host acknowledges it (`Ricevuta`, sent
 //! after the entry) or refuses it (`Rifiuto`), and resends it with the same id to the new host
 //! after a takeover or after [`Config::attesa_richiesta_ms`]. The host ignores ids it already
@@ -55,6 +62,9 @@ use crate::tavolo::{
     Errore, FRASI, IdGiocatore, Impostazioni, Partecipante, Posto, StatoTavolo, Tavolo, TipoTimer,
     Voce,
 };
+
+/// How far ahead of ours an epoch may be (a host claim, an entry, a snapshot).
+const SALTO_MAX_EPOCA: u64 = 16;
 
 /// Why a superseded node refuses everything.
 const SOSTITUITO: &str = "Questa partita è aperta in un'altra scheda";
@@ -886,6 +896,9 @@ impl<P: Clone + Ord> Nodo<P> {
         if epoca < self.epoca || (epoca == self.epoca && self.host.as_ref() != Some(&da)) {
             return;
         }
+        if !self.epoca_plausibile(epoca, &da.id) {
+            return;
+        }
         if epoca > self.epoca {
             self.segui(epoca, da);
         }
@@ -918,6 +931,15 @@ impl<P: Clone + Ord> Nodo<P> {
             // diverged or rejected: the host's replica wins
             _ => self.chiedi(p, 0),
         }
+    }
+
+    /// Whether `chi` may lead epoch `epoca`: a participant of our replica, and no wild jump
+    /// ahead (a peer cannot make itself host forever with `u64::MAX`). Without a replica we
+    /// cannot judge, and a table may well be at a high epoch after many takeovers.
+    fn epoca_plausibile(&self, epoca: u64, chi: &str) -> bool {
+        self.tavolo.as_ref().is_none_or(|t| {
+            epoca <= self.epoca.saturating_add(SALTO_MAX_EPOCA) && t.partecipante(chi).is_some()
+        })
     }
 
     /// Asks `p` for the entries from `da` on, or for a snapshot when `da` is 0.
@@ -963,6 +985,9 @@ impl<P: Clone + Ord> Nodo<P> {
     }
 
     fn istantanea_ricevuta(&mut self, epoca: u64, host: Regia, tavolo: Tavolo) {
+        if tavolo.valida().is_err() || !self.epoca_plausibile(epoca, &host.id) {
+            return; // corrupt or forged: it must not crash us later
+        }
         // a snapshot naming another session of our id never makes us host
         if self.e_host() && host == self.regia() {
             // a follower that was ahead of us when we took over
@@ -986,6 +1011,9 @@ impl<P: Clone + Ord> Nodo<P> {
     }
 
     fn host_ricevuto(&mut self, p: P, da: Regia, epoca: u64, n: u64) {
+        if !self.epoca_plausibile(epoca, &da.id) {
+            return;
+        }
         let accetta = epoca > self.epoca
             || (epoca == self.epoca
                 && self
@@ -1088,12 +1116,13 @@ impl<P: Clone + Ord> Nodo<P> {
                 *seat
             }
             Effimero::Striscia { seat, verso } => {
-                if *verso != (*seat + 3) % 4 {
+                let seat = posto(*seat).ok_or_else(|| Errore("Posto inesistente".into()))?;
+                if *verso != (seat + 3) % 4 {
                     return Err(Errore(
                         "Si striscia solo verso il giocatore precedente".into(),
                     ));
                 }
-                *seat
+                seat
             }
         };
         if !t.posti_di(id).contains(&seat) {
@@ -1572,6 +1601,11 @@ fn chiave_timer(t: &Tavolo) -> Option<ChiaveTimer> {
         });
     }
     None
+}
+
+/// A seat number from the wire, if it names a seat.
+pub fn posto(s: u8) -> Option<Seat> {
+    (s < 4).then_some(s)
 }
 
 /// Whether a pending request is still worth sending: a move must still be legal locally.
