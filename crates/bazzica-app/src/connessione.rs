@@ -100,6 +100,16 @@ impl Connessione {
         });
     }
 
+    /// Leaving the table: the signaller says goodbye, so the others see us gone at once.
+    /// The connection is kept a few seconds for that, then dropped.
+    pub fn chiudi(self: Rc<Self>) {
+        self.sessione.borrow_mut().chiudi();
+        spawn_forever(async move {
+            futures_timer::Delay::new(std::time::Duration::from_secs(3)).await;
+            drop(self);
+        });
+    }
+
     /// Takes the table back from another tab of the same identity.
     pub fn riprendi(&self) {
         self.sessione.borrow_mut().riprendi(ora());

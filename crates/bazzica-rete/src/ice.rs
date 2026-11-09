@@ -95,6 +95,8 @@ pub struct Diagnosi {
     pub relay_collegati: Option<usize>,
     /// Other peers seen in the room through the relays.
     pub peer_visti: usize,
+    /// Live events ignored because their time is far from this device's clock.
+    pub scartati_orario: usize,
 }
 
 /// Shared between the signaller (which writes) and the session (which reads).

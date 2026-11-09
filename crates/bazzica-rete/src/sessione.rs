@@ -9,13 +9,19 @@ use bazzica_net::{Destinatario, Effimero, Errore, Messaggio, Nodo, Richiesta, Us
 use matchbox_socket::{MessageLoopFuture, PeerId, PeerState, WebRtcSocket};
 
 use crate::ice::{Diagnosi, DiagnosiCondivisa, Turn, leggi, server_ice};
-use crate::segnalatore::NostrSignallerBuilder;
+use crate::segnalatore::{NostrSignallerBuilder, NotizieCondivise};
+
+/// How long a replaced socket is kept, so its signaller can say goodbye to the room (ms).
+const CONGEDO_MS: u64 = 3_000;
 
 pub struct Sessione {
     socket: WebRtcSocket,
     nodo: Nodo<PeerId>,
     turn: Option<Turn>,
     diagnosi: DiagnosiCondivisa,
+    notizie: NotizieCondivise,
+    /// Replaced sockets saying goodbye, dropped at the given time.
+    congedi: Vec<(WebRtcSocket, u64)>,
 }
 
 impl Sessione {
@@ -27,6 +33,7 @@ impl Sessione {
         turn: Option<Turn>,
     ) -> (Sessione, MessageLoopFuture) {
         let diagnosi = segnalatore.diagnosi.clone();
+        let notizie = segnalatore.notizie.clone();
         let (socket, ciclo) = Self::socket(codice, segnalatore, turn.as_ref());
         (
             Sessione {
@@ -34,6 +41,8 @@ impl Sessione {
                 nodo,
                 turn,
                 diagnosi,
+                notizie,
+                congedi: vec![],
             },
             ciclo,
         )
@@ -63,9 +72,12 @@ impl Sessione {
         turn: Option<Turn>,
     ) -> MessageLoopFuture {
         self.nodo.scollega_tutti(ora);
+        self.chiudi();
         self.diagnosi = segnalatore.diagnosi.clone();
+        self.notizie = segnalatore.notizie.clone();
         let (socket, ciclo) = Self::socket(codice, segnalatore, turn.as_ref());
-        self.socket = socket;
+        let vecchio = std::mem::replace(&mut self.socket, socket);
+        self.congedi.push((vecchio, ora + CONGEDO_MS));
         self.turn = turn;
         ciclo
     }
@@ -84,6 +96,14 @@ impl Sessione {
             .build()
     }
 
+    /// Asks the signaller to say goodbye to the room and stop (leaving the table). Keep the
+    /// session alive for a few seconds afterwards so the goodbye can go out.
+    pub fn chiudi(&mut self) {
+        if let Ok(mut n) = self.notizie.lock() {
+            n.chiudi = true;
+        }
+    }
+
     pub fn nodo(&self) -> &Nodo<PeerId> {
         &self.nodo
     }
@@ -95,11 +115,18 @@ impl Sessione {
 
     /// Processes the network and the clock; returns what the UI must react to.
     pub fn aggiorna(&mut self, ora: u64) -> Vec<Uscita<PeerId>> {
+        self.congedi.retain(|(_, fino)| ora < *fino);
         if let Ok(cambi) = self.socket.try_update_peers() {
             for (p, stato) in cambi {
-                match stato {
-                    PeerState::Connected => self.nodo.connesso(ora, p),
-                    PeerState::Disconnected => self.nodo.disconnesso(ora, &p),
+                let aperto = stato == PeerState::Connected;
+                // the signaller retries pairs whose link closed
+                if let Ok(mut n) = self.notizie.lock() {
+                    n.collegamenti.push_back((p, aperto));
+                }
+                if aperto {
+                    self.nodo.connesso(ora, p);
+                } else {
+                    self.nodo.disconnesso(ora, &p);
                 }
             }
         }
