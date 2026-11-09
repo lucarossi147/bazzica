@@ -60,7 +60,7 @@ use bazzica_core::{Azione, Evento, Fase, Mulberry32, Seat};
 use crate::protocollo::{Effimero, Messaggio, Regia, Richiesta, Sessione, VERSIONE_PROTOCOLLO};
 use crate::tavolo::{
     Errore, FRASI, IdGiocatore, Impostazioni, Partecipante, Posto, StatoTavolo, Tavolo, TipoTimer,
-    Voce, permesso,
+    Voce, normalizza, permesso,
 };
 
 /// How far ahead of ours an epoch may be (a host claim, an entry, a snapshot).
@@ -810,11 +810,10 @@ impl<P: Clone + Ord> Nodo<P> {
 
     /// Records a participant that said hello, if it is new or changed (host only).
     fn entra(&mut self, io: Partecipante) {
-        if self
-            .tavolo
-            .as_ref()
-            .is_some_and(|t| t.partecipante(&io.id) != Some(&io))
-        {
+        if self.tavolo.as_ref().is_some_and(|t| {
+            let attuale = t.partecipante(&io.id);
+            attuale != Some(&normalizza(&io, attuale, t.partecipanti.len()))
+        }) {
             let _ = self.aggiungi(Voce::Entra(io));
         }
     }

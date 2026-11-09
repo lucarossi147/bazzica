@@ -366,15 +366,7 @@ impl Tavolo {
         }
         match voce {
             Voce::Entra(p) => {
-                let p = Partecipante {
-                    id: p.id.clone(),
-                    nome: taglia(&p.nome, MAX_NOME, "Giocatore"),
-                    avatar: if AVATAR.contains(&p.avatar.as_str()) {
-                        p.avatar.clone()
-                    } else {
-                        AVATAR[self.partecipanti.len() % AVATAR.len()].into()
-                    },
-                };
+                let p = normalizza(p, self.partecipante(&p.id), self.partecipanti.len());
                 match self.partecipanti.iter_mut().find(|x| x.id == p.id) {
                     Some(x) => *x = p,
                     None => self.partecipanti.push(p),
@@ -506,6 +498,22 @@ impl Tavolo {
         if fase == Some(Fase::FinePartita) {
             self.stato = StatoTavolo::Finita;
         }
+    }
+}
+
+/// How a participant is stored: name trimmed and bounded; an unknown avatar keeps the current
+/// one (`attuale`), or gets one by join order (`n` participants so far). The host compares
+/// this with what it holds, so an unchanged reconnection appends no entry.
+pub fn normalizza(p: &Partecipante, attuale: Option<&Partecipante>, n: usize) -> Partecipante {
+    let avatar = if AVATAR.contains(&p.avatar.as_str()) {
+        p.avatar.clone()
+    } else {
+        attuale.map_or_else(|| AVATAR[n % AVATAR.len()].into(), |a| a.avatar.clone())
+    };
+    Partecipante {
+        id: p.id.clone(),
+        nome: taglia(&p.nome, MAX_NOME, "Giocatore"),
+        avatar,
     }
 }
 
