@@ -111,7 +111,11 @@ button.pericolo { background: var(--red); }
 .punteggi .squadra span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .punteggi .squadra b { font-family: Georgia, serif; font-size: 20px; color: var(--gold); }
 .punteggi .squadra.sq0 span { color: var(--team0-light); } .punteggi .squadra.sq1 span { color: var(--team1-light); }
-.punteggi .info { text-align: center; font-size: 10px; opacity: .8; line-height: 1.25; }
+.punteggi .info { text-align: center; font-size: 10px; line-height: 1.3; display: flex; flex-direction: column; align-items: center; min-width: 0; }
+.punteggi .info b { font-size: 11px; color: var(--cream); }
+.punteggi .info span { opacity: .8; }
+.info-azioni { display: flex; gap: 4px; margin-top: 1px; }
+button.icona { font-size: 11px; padding: 2px 8px; background: rgba(255,255,255,.12); color: var(--cream); border-radius: 999px; }
 
 /* the middle shrinks first; if it still does not fit it scrolls, the hand stays put */
 .campo { flex: 1; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2.4fr) minmax(0, 1fr); grid-template-rows: auto 1fr; grid-template-areas: "alto alto alto" "sx centro dx"; gap: 4px; padding: 4px 6px; }
@@ -121,7 +125,13 @@ button.pericolo { background: var(--red); }
 .area-centro { grid-area: centro; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-width: 0; }
 
 .giocatore { color: var(--cream); background: rgba(0,0,0,.18); border-radius: 8px; padding: 3px 6px; display: flex; flex-direction: column; gap: 2px; max-width: 100%; min-width: 0; border: 2px solid transparent; }
-.giocatore.di-turno { border-color: var(--gold); box-shadow: 0 0 12px rgba(232,194,90,.5); }
+.giocatore.di-turno { border-color: var(--gold); background: rgba(232,194,90,.16); animation: chiama 1.6s ease-in-out infinite; }
+.segnaturno { font-size: 11px; color: var(--gold); font-weight: 600; }
+.puntini-attesa::after { content: "…"; display: inline-block; width: 1.2em; text-align: left; animation: puntini 1.2s steps(4, end) infinite; overflow: hidden; vertical-align: bottom; }
+@keyframes chiama { 0%, 100% { box-shadow: 0 0 0 0 rgba(232,194,90,.55); } 50% { box-shadow: 0 0 0 6px rgba(232,194,90,0); } }
+@keyframes puntini { from { width: 0; } to { width: 1.2em; } }
+.ultima-giocata { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--cream); opacity: .9; }
+.carta.pollice { width: calc(var(--mw) * 1.15); border-radius: 2px; box-shadow: 0 1px 2px rgba(0,0,0,.4); }
 .giocatore .chi { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; font-size: 12px; min-width: 0; }
 .giocatore .chi > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .giocatore.sq0 .chi > span:nth-child(2) { color: var(--team0-light); } .giocatore.sq1 .chi > span:nth-child(2) { color: var(--team1-light); }
@@ -142,13 +152,24 @@ button.pericolo { background: var(--red); }
 @media (hover: hover) { .carta.in-mano.cliccabile:hover { transform: translateY(-4px); } }
 
 .tavola { display: flex; flex-wrap: wrap; justify-content: center; align-content: center; gap: 4px; min-height: calc(var(--tw) * 1.67 + 8px); padding: 4px; border-radius: 10px; background: rgba(0,0,0,.12); width: 100%; }
+/* the table edge facing whoever is playing lights up */
+.tavola { transition: box-shadow .3s ease; }
+.tavola[data-verso="alto"] { box-shadow: inset 0 4px 0 var(--gold), 0 -6px 14px -6px rgba(232,194,90,.6); }
+.tavola[data-verso="basso"] { box-shadow: inset 0 -4px 0 var(--gold), 0 6px 14px -6px rgba(232,194,90,.6); }
+.tavola[data-verso="sx"] { box-shadow: inset 4px 0 0 var(--gold), -6px 0 14px -6px rgba(232,194,90,.6); }
+.tavola[data-verso="dx"] { box-shadow: inset -4px 0 0 var(--gold), 6px 0 14px -6px rgba(232,194,90,.6); }
 .tavola .vuota { color: var(--cream); opacity: .5; font-size: 12px; }
 .dettagli { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 4px; font-size: 11px; color: var(--cream); opacity: .9; }
 .dettagli .sq0 { color: var(--team0-light); } .dettagli .sq1 { color: var(--team1-light); }
-.ultima { font-size: 11px; color: var(--gold); text-align: center; max-width: 100%; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+button.ultima { font-size: 11px; color: var(--gold); background: none; padding: 2px 4px; text-align: center; max-width: 100%; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+button.ultima .sq0 { color: var(--team0-light); } button.ultima .sq1 { color: var(--team1-light); }
+button.ultima .freccia { color: var(--cream); opacity: .7; text-decoration: underline; text-underline-offset: 2px; }
 
 /* pinned at the bottom */
-.stato { display: flex; justify-content: center; align-items: center; gap: 8px; color: var(--cream); font-weight: 600; font-size: 14px; padding: 2px 6px; flex: none; }
+.turno { display: flex; justify-content: center; align-items: center; gap: 8px; color: var(--cream); font-weight: 600; font-size: 14px; padding: 3px 8px; flex: none; min-height: 30px; }
+.turno .chi-gioca { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.turno.mio .chi-gioca { background: var(--gold); color: var(--wood-dark); padding: 3px 14px; border-radius: 999px; font-size: 16px; box-shadow: 0 0 0 3px rgba(232,194,90,.35); animation: chiama 1.6s ease-in-out infinite; }
+.turno .ultima-giocata { color: var(--cream); opacity: .85; }
 .timer { font-family: ui-monospace, Menlo, Consolas, monospace; background: rgba(0,0,0,.3); border-radius: 8px; padding: 1px 7px; }
 .timer.urgente { background: var(--red); }
 .mano { padding: 2px 6px calc(6px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 4px; align-items: center; flex: none; }
@@ -171,7 +192,11 @@ button.opzione { background: var(--felt); text-align: left; font-size: 15px; pad
 .riepilogo { width: 100%; border-collapse: collapse; font-size: 14px; }
 .riepilogo th, .riepilogo td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: center; }
 .riepilogo td:first-child { text-align: left; color: var(--muted); }
-.riepilogo tr:last-child td, .riepilogo tr:nth-last-child(2) td { font-weight: 700; }
+.riepilogo tr.subtotale td { font-weight: 700; }
+.riepilogo tr.dettaglio td { font-size: 12px; color: var(--muted); padding-top: 1px; padding-bottom: 1px; }
+.riepilogo tr.dettaglio td:first-child { padding-left: 18px; }
+.riepilogo tr.totale td { font-weight: 700; font-size: 15px; }
+.riepilogo tr.subtotale + tr.totale td, .riepilogo tr:not(.totale) + tr.totale td { border-top: 2px solid var(--ink); }
 .punteggio-finale { font-family: Georgia, serif; font-size: 22px; text-align: center; }
 details { margin: 8px 0; }
 summary { cursor: pointer; color: var(--muted); }
@@ -195,7 +220,7 @@ summary { cursor: pointer; color: var(--muted); }
   .punteggi { grid-column: 1 / -1; grid-row: 1; }
   .partita > .banner { grid-column: 1 / -1; grid-row: 2; }
   .campo { grid-column: 1; grid-row: 3 / span 2; grid-template-columns: minmax(0, 1fr) minmax(0, 3fr) minmax(0, 1fr); }
-  .stato { grid-column: 2; grid-row: 3; align-self: end; flex-wrap: wrap; }
+  .turno { grid-column: 2; grid-row: 3; align-self: end; flex-wrap: wrap; }
   .mano { grid-column: 2; grid-row: 4; max-width: 46vw; }
   .carte-mano { padding-top: 6px; }
   .opzioni { left: auto; right: 8px; width: min(420px, 60vw); bottom: calc(var(--cw) * 1.67 + 16px); }
@@ -221,3 +246,57 @@ summary { cursor: pointer; color: var(--muted); }
 button.chiacchiera { background: rgba(255,255,255,.12); color: var(--cream); font-size: 13px; padding: 4px 10px; }
 .frasi { position: fixed; left: 8px; right: 8px; bottom: calc(var(--cw) * 1.67 + 24px + env(safe-area-inset-bottom)); margin: 0 auto; max-width: 460px; display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; background: var(--panel); border-radius: 12px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.45); z-index: 20; }
 .frasi button { background: var(--felt); }
+
+/* ---------- choosing a card ---------- */
+.opzioni .nota { margin: 0 0 2px; }
+.opzioni .conferma { margin: 0; color: var(--ink); }
+.suggerimento { margin: 0; font-size: 12px; color: var(--cream); opacity: .85; text-align: center; }
+.carta.in-mano.scelta { transform: translateY(-14px); }
+
+/* ---------- one device, several seats ---------- */
+.passa-telefono { background: var(--felt-deep); cursor: pointer; }
+.passa-telefono .finestra { text-align: center; }
+
+/* ---------- plays of the hand ---------- */
+.giocate h3 { margin: 12px 0 4px; }
+.elenco-giocate { list-style: none; margin: 0; padding: 0; }
+.elenco-giocate li { display: grid; grid-template-columns: minmax(0, 8em) auto 1fr; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.elenco-giocate .chi { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.elenco-giocate .carta.pollice { width: 22px; }
+
+/* ---------- tutorial ---------- */
+.desc-variante { font-size: 13px; color: var(--muted); margin: 6px 0; }
+button.guida-link { background: none; color: var(--gold); text-decoration: underline; text-underline-offset: 3px; padding: 4px 8px; }
+.finestra.guida { position: relative; max-width: 520px; padding-top: 12px; }
+.finestra.guida h2 { margin-top: 10px; }
+.finestra.guida .testo { line-height: 1.5; margin: 0 0 10px; }
+.finestra.guida .intro { font-family: Georgia, serif; font-style: italic; color: var(--muted); margin: 10px 0 0; }
+button.chiudi { position: absolute; top: 6px; right: 6px; background: none; color: var(--muted); font-size: 22px; padding: 2px 10px; }
+.capitoli { display: flex; gap: 6px; overflow-x: auto; padding: 2px 36px 6px 0; scrollbar-width: thin; }
+button.capitolo { flex: none; font-size: 13px; padding: 5px 10px; background: #efe6cf; color: var(--ink); border-radius: 999px; }
+button.capitolo.scelto { background: var(--felt); color: #fff; }
+.esempio { background: var(--felt); border-radius: 12px; padding: 10px; color: var(--cream); display: flex; flex-direction: column; gap: 8px; }
+.es-riga { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.es-etichetta { font-size: 12px; opacity: .8; width: 5.5em; flex: none; }
+.es-carte { display: flex; gap: 6px; flex-wrap: wrap; }
+.es-carte .carta.in-tavola { width: clamp(34px, 11vw, 56px); }
+.es-carte .carta.fitte + .carta.fitte { margin-left: -14px; }
+.esempio .carta.presa { box-shadow: 0 0 0 3px var(--gold), 0 2px 6px rgba(0,0,0,.35); }
+.esempio .carta.lasciata { opacity: .55; }
+.esempio .carta.appena { outline: 2px dashed var(--cream); outline-offset: 3px; }
+.esempio .tag { margin-left: 0; }
+.es-esito { margin: 0; font-weight: 700; color: var(--gold); }
+.avanzamento { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
+.puntini { display: flex; gap: 5px; }
+.puntino { width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+.puntino.acceso { background: var(--felt); }
+.offerta-guida { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; padding: 4px 8px; background: rgba(0,0,0,.28); color: var(--cream); font-size: 13px; flex: none; }
+.offerta-guida button { font-size: 12px; padding: 4px 10px; }
+
+/* keyboard users see where they are */
+button:focus-visible, select:focus-visible, input:focus-visible, .carta.cliccabile:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .giocatore.di-turno, .turno.mio .chi-gioca, .puntini-attesa::after { animation: none; }
+  .carta.in-mano, .tavola { transition: none; }
+}
