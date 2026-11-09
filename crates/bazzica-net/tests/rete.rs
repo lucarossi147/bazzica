@@ -44,6 +44,7 @@ fn config() -> Config {
         ritardo_bot: (100, 300),
         pausa_fine_mano: 500,
         pausa_palo: 3000,
+        ..Config::default()
     }
 }
 
@@ -919,4 +920,95 @@ fn strumenti_della_rete() {
     r.collega(a, b);
     r.assert_sincronizzati();
     assert!(r.inviati.iter().any(|(_, d, _)| *d == c));
+}
+
+/// Makes `c`'s replica differ from the host's at the same `n`, by handing it a doctored
+/// snapshot as if it came from the host. Returns the host's handle.
+fn devia(r: &mut Rete, c: H) -> H {
+    let h = r.host_h();
+    let mut falso = r.tavolo(c).clone();
+    falso.impostazioni.nome = "Tavolo falso".into();
+    let msg = Messaggio::Istantanea {
+        epoca: r.nodo(c).epoca(),
+        host: r.nodo(c).host().unwrap().clone(),
+        tavolo: Box::new(falso),
+    };
+    r.coda.push_back((h, c, msg.codifica()));
+    r.pompa();
+    assert_ne!(r.tavolo(c).impronta(), r.tavolo(h).impronta());
+    h
+}
+
+/// Plays and advances time until everyone agrees (or gives up after `giri` rounds).
+fn fino_a_sincronizzati(r: &mut Rete, giri: usize) {
+    for _ in 0..giri {
+        let impronte: BTreeSet<_> = r
+            .nodi
+            .values()
+            .map(|n| n.tavolo().map(Tavolo::impronta))
+            .collect();
+        if impronte.len() == 1 {
+            break;
+        }
+        let handles: Vec<H> = r.nodi.keys().copied().collect();
+        if !handles
+            .into_iter()
+            .fold(false, |m, h| r.gioca_umani(h, true) | m)
+        {
+            r.avanza(10_000);
+        }
+    }
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn richiesta_istantanea_persa_si_ripete() {
+    let (mut r, a, _, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    devia(&mut r, c);
+    // c notices on the next entry and asks for a snapshot, which is lost
+    r.perdi(a, c, |m| matches!(m, Messaggio::Istantanea { .. }));
+    let n = r.tavolo(a).n;
+    r.gioca_fino(n + 1);
+    assert!(
+        r.da_perdere.is_empty(),
+        "the snapshot was requested and lost"
+    );
+    fino_a_sincronizzati(&mut r, 50);
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn host_esce_mentre_chiedo_istantanea() {
+    let (mut r, a, b, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    devia(&mut r, c);
+    // the next entry reaches c, whose snapshot request is still on the wire when a leaves
+    r.perdi(c, a, |m| matches!(m, Messaggio::ChiediDa { da: 0 }));
+    let n = r.tavolo(a).n;
+    r.gioca_fino(n + 1);
+    assert!(r.da_perdere.is_empty());
+    r.esci(a);
+    assert!(r.nodo(b).e_host());
+    fino_a_sincronizzati(&mut r, 50);
+}
+
+#[test]
+fn chiedi_da_a_chi_non_e_host() {
+    let (mut r, a, b, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    devia(&mut r, c);
+    // a follower gets a snapshot request: it does not answer, and c still gets in sync
+    r.coda
+        .push_back((c, b, Messaggio::ChiediDa { da: 0 }.codifica()));
+    r.perdi(c, a, |m| matches!(m, Messaggio::ChiediDa { da: 0 }));
+    let n = r.tavolo(a).n;
+    r.gioca_fino(n + 1);
+    assert!(
+        !r.inviati
+            .iter()
+            .any(|(da, a2, m)| *da == b && *a2 == c && matches!(m, Messaggio::Istantanea { .. }))
+    );
+    fino_a_sincronizzati(&mut r, 50);
 }
