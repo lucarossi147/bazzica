@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, Voce};
 
 /// Bumped on any incompatible change to the messages or to the replicated state.
-pub const VERSIONE_PROTOCOLLO: u32 = 2;
+///
+/// - 3: `Allineato`, the answer to a `Host` claim (sync barrier of a new host).
+pub const VERSIONE_PROTOCOLLO: u32 = 3;
 
 /// What a player asks the host to do. The host checks permissions and turns it into a [`Voce`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +75,14 @@ pub enum Messaggio {
     /// Follower -> host: please resend entries from `da` (or a snapshot).
     ChiediDa {
         da: u64,
+    },
+    /// Follower -> new host: "I follow your claim at `epoca`; my replica is at `n` with this
+    /// hash" (`n` 0 and an empty hash without a replica). The host sequences nothing until
+    /// every peer answered or the wait expired.
+    Allineato {
+        epoca: u64,
+        n: u64,
+        impronta: String,
     },
     Effimero(Effimero),
 }

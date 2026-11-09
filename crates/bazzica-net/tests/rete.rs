@@ -45,6 +45,7 @@ fn config() -> Config {
         pausa_fine_mano: 500,
         pausa_palo: 3000,
         attesa_istantanea_ms: 500,
+        attesa_allineamento_ms: 1000,
     }
 }
 
@@ -1085,6 +1086,26 @@ fn nuovo_host_non_agisce_prima_di_allinearsi() {
         (n_c, impronta_c),
         "c's entry was kept"
     );
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+#[test]
+fn allineamento_scade() {
+    let (mut r, a, b, c) = tavolo_tutti_bot();
+    r.gioca_fino(30);
+    let n = r.tavolo(b).n;
+    // c's answer to the claim is lost: b waits for it, but not forever
+    r.perdi(c, b, |m| matches!(m, Messaggio::Allineato { .. }));
+    r.esci(a);
+    assert!(r.nodo(b).e_host());
+    assert!(
+        r.da_perdere.is_empty(),
+        "c answered and the answer was lost"
+    );
+    r.tick_solo(b, config().attesa_allineamento_ms - 1);
+    assert_eq!(r.tavolo(b).n, n, "still aligning");
+    r.gioca_fino(n + 5);
+    assert!(r.tavolo(b).n >= n + 5, "the host resumed after the timeout");
     r.gioca_fino(u64::MAX);
     r.assert_sincronizzati();
 }

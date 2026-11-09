@@ -10,6 +10,14 @@
 //! If the host leaves, the first connected participant in join order takes over with a higher
 //! `epoca`; peers that are ahead hand it their replica, peers that are behind catch up.
 //!
+//! Sync barrier: a peer that wins an election sequences nothing (no bot plan, no timer, no
+//! request, no `Entra`) until every introduced peer answered its `Host` claim with `Allineato`
+//! (sent after the peer's longer snapshot or catch-up request) or
+//! [`Config::attesa_allineamento_ms`] passed. Requests that arrive meanwhile are queued, not
+//! refused. A peer that reported the same length with another hash gets the host's snapshot
+//! (the host's replica wins ties). A follower that receives an entry at a position it already
+//! holds compares the hashes and resyncs on a difference.
+//!
 //! Resync: a follower whose replica mismatches the host's hash asks for a snapshot
 //! (`ChiediDa { da: 0 }`) and stops asking for missing entries until it arrives. An unanswered
 //! request is sent again after [`Config::attesa_istantanea_ms`] to whoever hosts by then, and is
@@ -37,6 +45,8 @@ pub struct Config {
     pub pausa_palo: u64,
     /// How long a snapshot request may go unanswered before it is sent again, in ms.
     pub attesa_istantanea_ms: u64,
+    /// How long a new host waits for its peers' `Allineato` before sequencing, in ms.
+    pub attesa_allineamento_ms: u64,
 }
 
 impl Default for Config {
@@ -46,6 +56,7 @@ impl Default for Config {
             pausa_fine_mano: 2000,
             pausa_palo: 3000,
             attesa_istantanea_ms: 3000,
+            attesa_allineamento_ms: 2000,
         }
     }
 }
@@ -86,6 +97,32 @@ struct Remoto {
     id: IdGiocatore,
     /// Whether it holds a replica (only those can take over as host).
     replica: bool,
+}
+
+/// A freshly elected host waiting for its peers' replicas before sequencing anything.
+#[derive(Clone, Debug)]
+struct Allineamento<P> {
+    /// Peers that have not answered the claim yet.
+    attese: BTreeSet<P>,
+    /// When the host stops waiting, in ms.
+    scadenza: u64,
+    /// What each peer reported: its replica length and hash.
+    rapporti: Vec<(P, u64, String)>,
+    /// Work that would sequence entries, done when the barrier ends.
+    in_coda: Vec<InCoda<P>>,
+}
+
+#[derive(Clone, Debug)]
+enum InCoda<P> {
+    /// A request from a peer (`None`: the local user).
+    Richiesta {
+        da: Option<P>,
+        rid: u64,
+        id: IdGiocatore,
+        richiesta: Richiesta,
+    },
+    /// A participant said hello and may need an `Entra` entry.
+    Entra(Partecipante),
 }
 
 /// A snapshot asked for and not received yet.
@@ -129,6 +166,8 @@ pub struct Nodo<P> {
     rid: u64,
     attesa_istantanea: Option<RichiestaIstantanea<P>>,
     // host only
+    /// Set from a won election until the peers answered: nothing is sequenced meanwhile.
+    allineamento: Option<Allineamento<P>>,
     piano: Option<(u64, u64, Piano)>,
     timer: Option<(ChiaveTimer, u64)>,
     ultimo_palo: [Option<u64>; 4],
@@ -165,6 +204,7 @@ impl<P: Clone + Ord> Nodo<P> {
             peers: BTreeMap::new(),
             rid: 0,
             attesa_istantanea: None,
+            allineamento: None,
             piano: None,
             timer: None,
             ultimo_palo: [None; 4],
@@ -241,6 +281,7 @@ impl<P: Clone + Ord> Nodo<P> {
             self.piano.map(|p| p.0),
             self.timer.as_ref().map(|t| t.1),
             istantanea,
+            self.allineamento.as_ref().map(|a| a.scadenza),
         ]
         .into_iter()
         .flatten()
@@ -302,6 +343,12 @@ impl<P: Clone + Ord> Nodo<P> {
         if !host_presente {
             self.elezione();
         }
+        if let Some(a) = &mut self.allineamento {
+            a.attese.remove(p);
+            if a.attese.is_empty() {
+                return self.fine_allineamento();
+            }
+        }
         self.ripianifica();
     }
 
@@ -316,6 +363,13 @@ impl<P: Clone + Ord> Nodo<P> {
     pub fn tick(&mut self, ora: u64) {
         self.ora = ora;
         self.ripeti_istantanea();
+        if self
+            .allineamento
+            .as_ref()
+            .is_some_and(|a| ora >= a.scadenza)
+        {
+            self.fine_allineamento();
+        }
         while self.e_host() {
             if let Some((t, _, piano)) = self.piano
                 && t <= ora
@@ -340,9 +394,7 @@ impl<P: Clone + Ord> Nodo<P> {
         self.rid += 1;
         if self.e_host() {
             let id = self.io.id.clone();
-            if let Err(e) = self.esegui(&id, r) {
-                self.uscite.push(Uscita::Rifiutata { motivo: e.0 });
-            }
+            self.richiesta_al_host(None, self.rid, id, r);
         } else if let Some(p) = self.peer_host() {
             self.invia(
                 Destinatario::Uno(p),
@@ -409,13 +461,8 @@ impl<P: Clone + Ord> Nodo<P> {
         match msg {
             Messaggio::Ciao { .. } => unreachable!(),
             Messaggio::Richiesta { rid, richiesta } => {
-                if self.e_host()
-                    && let Err(e) = self.esegui(&da, richiesta)
-                {
-                    self.invia(
-                        Destinatario::Uno(p),
-                        Messaggio::Rifiuto { rid, motivo: e.0 },
-                    );
+                if self.e_host() {
+                    self.richiesta_al_host(Some(p), rid, da, richiesta);
                 }
             }
             Messaggio::Rifiuto { motivo, .. } => self.uscite.push(Uscita::Rifiutata { motivo }),
@@ -432,6 +479,9 @@ impl<P: Clone + Ord> Nodo<P> {
             } => self.istantanea_ricevuta(epoca, host, *tavolo),
             Messaggio::Host { epoca, n } => self.host_ricevuto(p, da, epoca, n),
             Messaggio::ChiediDa { da: da_n } => self.chiedi_da(p, da_n),
+            Messaggio::Allineato { epoca, n, impronta } => {
+                self.allineato_ricevuto(p, epoca, n, impronta)
+            }
             Messaggio::Effimero(e) => {
                 if self.valida_effimero(&da, &e).is_ok() {
                     self.uscite.push(Uscita::Effimero { da, effetto: e });
@@ -454,11 +504,97 @@ impl<P: Clone + Ord> Nodo<P> {
         if !self.e_host() {
             return;
         }
-        let Some(t) = &self.tavolo else { return };
-        if t.partecipante(&io.id) != Some(&io) {
-            let _ = self.aggiungi(Voce::Entra(io));
+        if self.tavolo.is_none() {
+            return;
+        }
+        match &mut self.allineamento {
+            Some(a) => a.in_coda.push(InCoda::Entra(io)),
+            None => self.entra(io),
         }
         self.manda_istantanea(Destinatario::Uno(p));
+        self.ripianifica();
+    }
+
+    /// Records a participant that said hello, if it is new or changed (host only).
+    fn entra(&mut self, io: Partecipante) {
+        if self
+            .tavolo
+            .as_ref()
+            .is_some_and(|t| t.partecipante(&io.id) != Some(&io))
+        {
+            let _ = self.aggiungi(Voce::Entra(io));
+        }
+    }
+
+    /// A request reaching the host (`da`: the peer it came from, `None` for the local user):
+    /// queued while aligning, otherwise turned into an entry or refused.
+    fn richiesta_al_host(
+        &mut self,
+        da: Option<P>,
+        rid: u64,
+        id: IdGiocatore,
+        richiesta: Richiesta,
+    ) {
+        if let Some(a) = &mut self.allineamento {
+            a.in_coda.push(InCoda::Richiesta {
+                da,
+                rid,
+                id,
+                richiesta,
+            });
+            return;
+        }
+        if let Err(e) = self.esegui(&id, richiesta) {
+            match da {
+                Some(p) => self.invia(
+                    Destinatario::Uno(p),
+                    Messaggio::Rifiuto { rid, motivo: e.0 },
+                ),
+                None => self.uscite.push(Uscita::Rifiutata { motivo: e.0 }),
+            }
+        }
+    }
+
+    /// A follower answered our claim.
+    fn allineato_ricevuto(&mut self, p: P, epoca: u64, n: u64, impronta: String) {
+        if !self.e_host() || epoca != self.epoca {
+            return;
+        }
+        let Some(a) = &mut self.allineamento else {
+            return;
+        };
+        a.attese.remove(&p);
+        a.rapporti.push((p, n, impronta));
+        if a.attese.is_empty() {
+            self.fine_allineamento();
+        }
+    }
+
+    /// Everyone answered (or the wait expired): fix the peers that hold another replica of
+    /// the same length, then do the queued work and start sequencing.
+    fn fine_allineamento(&mut self) {
+        let Some(a) = self.allineamento.take() else {
+            return;
+        };
+        if let Some(t) = &self.tavolo {
+            let (mio_n, mia) = (t.n, t.impronta());
+            for (p, n, impronta) in a.rapporti {
+                if n == mio_n && impronta != mia {
+                    self.manda_istantanea(Destinatario::Uno(p));
+                }
+            }
+        }
+        for lavoro in a.in_coda {
+            match lavoro {
+                InCoda::Richiesta {
+                    da,
+                    rid,
+                    id,
+                    richiesta,
+                } => self.richiesta_al_host(da, rid, id, richiesta),
+                InCoda::Entra(io) => self.entra(io),
+            }
+        }
         self.ripianifica();
     }
 
@@ -481,6 +617,15 @@ impl<P: Clone + Ord> Nodo<P> {
             return self.chiedi(p, 0);
         };
         if n <= t.n {
+            // already applied: but did we apply the same thing?
+            let nostra = if n > self.log_base {
+                Some(self.log[(n - self.log_base - 1) as usize].1.clone())
+            } else {
+                (n == t.n).then(|| t.impronta())
+            };
+            if nostra.is_some_and(|i| i != impronta) {
+                self.chiedi(p, 0);
+            }
             return;
         }
         if n > t.n + 1 {
@@ -585,20 +730,38 @@ impl<P: Clone + Ord> Nodo<P> {
             return;
         }
         self.segui(epoca, da.clone());
-        let Some(t) = &self.tavolo else {
-            return self.chiedi(p, 0);
+        let (mio_n, mia) = match &self.tavolo {
+            None => {
+                self.chiedi(p.clone(), 0);
+                (0, String::new())
+            }
+            Some(t) if t.n > n => {
+                let msg = Messaggio::Istantanea {
+                    epoca,
+                    host: da,
+                    tavolo: Box::new(t.clone()),
+                };
+                let stato = (t.n, t.impronta());
+                self.invia(Destinatario::Uno(p.clone()), msg);
+                stato
+            }
+            Some(t) => {
+                let stato = (t.n, t.impronta());
+                if t.n < n {
+                    self.chiedi(p.clone(), t.n + 1);
+                }
+                stato
+            }
         };
-        if t.n > n {
-            let msg = Messaggio::Istantanea {
+        // sent after the snapshot or the catch-up request: the channel is ordered
+        self.invia(
+            Destinatario::Uno(p),
+            Messaggio::Allineato {
                 epoca,
-                host: da,
-                tavolo: Box::new(t.clone()),
-            };
-            self.invia(Destinatario::Uno(p), msg);
-        } else if t.n < n {
-            let da_n = t.n + 1;
-            self.chiedi(p, da_n);
-        }
+                n: mio_n,
+                impronta: mia,
+            },
+        );
     }
 
     fn chiedi_da(&mut self, p: P, da: u64) {
@@ -689,6 +852,8 @@ impl<P: Clone + Ord> Nodo<P> {
         if !self.e_host() {
             self.piano = None;
             self.timer = None;
+            // queued requests are dropped: their senders retry with the new host
+            self.allineamento = None;
         }
     }
 
@@ -716,6 +881,19 @@ impl<P: Clone + Ord> Nodo<P> {
             self.epoca += 1;
             self.host = Some(self.io.id.clone());
             let n = t.n;
+            // Wait for every introduced peer, not only those flagged with a replica: the
+            // flags can be stale, and a peer without a replica answers too (with n = 0).
+            self.allineamento = Some(Allineamento {
+                attese: self
+                    .peers
+                    .iter()
+                    .filter(|(_, r)| r.is_some())
+                    .map(|(p, _)| p.clone())
+                    .collect(),
+                scadenza: self.ora + self.config.attesa_allineamento_ms,
+                rapporti: vec![],
+                in_coda: vec![],
+            });
             self.invia(
                 Destinatario::Tutti,
                 Messaggio::Host {
@@ -725,6 +903,7 @@ impl<P: Clone + Ord> Nodo<P> {
             );
         } else {
             self.host = None;
+            self.allineamento = None;
         }
     }
 
@@ -859,6 +1038,7 @@ impl<P: Clone + Ord> Nodo<P> {
     /// Recomputes the next bot move / system step and the running timer (host only).
     fn ripianifica(&mut self) {
         let attivo = self.e_host()
+            && self.allineamento.is_none()
             && !self.in_pausa()
             && self
                 .tavolo
