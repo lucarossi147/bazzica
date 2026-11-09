@@ -453,11 +453,19 @@ fn lobby_replicata() {
         "Non puoi liberare questo posto"
     );
     r.richiedi(a, Richiesta::Alzati { posto: 1 }); // the creator can
+    // a spectator cannot start the game (P14); a seated player can, with four seats taken
     r.richiedi(c, Richiesta::Avvia);
     assert_eq!(
         r.rifiuti[&c].last().unwrap(),
+        "Solo chi è seduto al tavolo può avviare la partita"
+    );
+    r.richiedi(b, Richiesta::Siedi { posto: 1 });
+    r.richiedi(b, Richiesta::Avvia);
+    assert_eq!(
+        r.rifiuti[&b].last().unwrap(),
         "Servono 4 giocatori (umani o bot)"
     );
+    r.richiedi(b, Richiesta::Alzati { posto: 1 });
     let t = r.tavolo(b);
     assert_eq!(
         t.partecipanti
@@ -1668,4 +1676,21 @@ fn messaggi_mutati_non_fanno_danni() {
         .map(|h| (r.tavolo(*h).n, r.tavolo(*h).impronta()))
         .collect();
     assert_eq!(onesti.len(), 1, "honest peers diverged");
+}
+
+#[test]
+fn lo_spettatore_non_cambia_le_regole() {
+    let (mut r, a, _, c) = tavolo_tipico(Variante::Vanilla);
+    r.richiedi(a, Richiesta::Termina);
+    r.richiedi(c, Richiesta::Imposta(imp(Variante::Heisenberg)));
+    assert_eq!(
+        r.rifiuti[&c].last().unwrap(),
+        "Solo chi ha creato il tavolo può cambiare le regole"
+    );
+    assert_eq!(r.tavolo(a).impostazioni.variante, Variante::Vanilla);
+    // with the creator gone, the host may
+    r.esci(a);
+    let b = r.host_h();
+    r.richiedi(b, Richiesta::Imposta(imp(Variante::Heisenberg)));
+    assert_eq!(r.tavolo(b).impostazioni.variante, Variante::Heisenberg);
 }

@@ -698,11 +698,15 @@ fn Fine(vista: Vista) -> Element {
                     }
                 }
                 div { class: "riga",
-                    button { class: "primario", onclick: move |_| ctx.richiedi(Richiesta::Avvia), "Rivincita" }
-                    button {
-                        class: "secondario",
-                        onclick: move |_| ctx.richiedi(Richiesta::Imposta(imp.clone())),
-                        "Torna ai posti"
+                    if vista.puo(&Richiesta::Avvia) {
+                        button { class: "primario", onclick: move |_| ctx.richiedi(Richiesta::Avvia), "Rivincita" }
+                    }
+                    if vista.puo(&Richiesta::Imposta(imp.clone())) {
+                        button {
+                            class: "secondario",
+                            onclick: move |_| ctx.richiedi(Richiesta::Imposta(imp.clone())),
+                            "Torna ai posti"
+                        }
                     }
                 }
             }

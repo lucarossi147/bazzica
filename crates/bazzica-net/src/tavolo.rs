@@ -509,9 +509,153 @@ impl Tavolo {
     }
 }
 
+/// Who may ask for what: the one place where the table's permissions live (the host checks it
+/// before sequencing, the UI to hide what one cannot do). `creatore_presente`: whether the
+/// creator is connected; `host`: who hosts now.
+///
+/// | Request                      | Allowed for                                              |
+/// |------------------------------|----------------------------------------------------------|
+/// | `Imposta`                    | the creator; the host while the creator is away          |
+/// | `Avvia`                      | the creator or a seated human                            |
+/// | `Bot` (add) / `Siedi`        | anyone                                                   |
+/// | `Bot` (remove), `Sostituisci`, `Termina` | the creator or a seated human                |
+/// | `Alzati`                     | the seat's owner, anyone for a bot, the creator          |
+/// | `Prosegui`                   | a seated human                                           |
+/// | `Azione`                     | the human in that seat                                   |
+pub fn permesso(
+    t: &Tavolo,
+    chi: &str,
+    r: &crate::protocollo::Richiesta,
+    creatore_presente: bool,
+    host: Option<&str>,
+) -> Result<(), Errore> {
+    use crate::protocollo::Richiesta as R;
+    let creatore = t.creatore() == chi;
+    let seduto = t.umani().contains(chi);
+    let consentito = |ok: bool, motivo: &str| if ok { Ok(()) } else { errore(motivo) };
+    match r {
+        R::Imposta(_) => consentito(
+            creatore || (!creatore_presente && host == Some(chi)),
+            "Solo chi ha creato il tavolo può cambiare le regole",
+        ),
+        R::Avvia => consentito(
+            creatore || seduto,
+            "Solo chi è seduto al tavolo può avviare la partita",
+        ),
+        R::Bot { aggiungi: true, .. } | R::Siedi { .. } | R::Riprendi { .. } => Ok(()),
+        R::Bot {
+            aggiungi: false, ..
+        } => consentito(
+            creatore || seduto,
+            "Solo chi è seduto al tavolo può togliere un bot",
+        ),
+        R::Sostituisci { .. } => consentito(
+            creatore || seduto,
+            "Solo chi è seduto al tavolo può sostituire un giocatore",
+        ),
+        R::Termina => consentito(
+            creatore || seduto,
+            "Solo chi è seduto al tavolo può terminare la partita",
+        ),
+        R::Alzati { posto } => {
+            let bot = matches!(t.posti.get(usize::from(*posto)), Some(Some(Posto::Bot)));
+            consentito(
+                creatore || bot || t.posti_di(chi).contains(posto),
+                "Non puoi liberare questo posto",
+            )
+        }
+        R::Prosegui => consentito(seduto, "Non sei seduto al tavolo"),
+        R::Azione(a) => match a.seat() {
+            None => errore("Azione riservata al sistema"),
+            Some(s) => consentito(t.posti_di(chi).contains(&s), "Non controlli questo posto"),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocollo::Richiesta as R;
+
+    #[test]
+    fn chi_puo_chiedere_cosa() {
+        let p = |id: &str| Partecipante {
+            id: id.into(),
+            nome: id.into(),
+            avatar: AVATAR[0].into(),
+        };
+        let mut t = Tavolo::nuovo(p("crea"), Impostazioni::default());
+        for id in ["seduto", "spett"] {
+            t.partecipanti.push(p(id));
+        }
+        t.posti = [
+            Some(Posto::Umano {
+                id: "seduto".into(),
+            }),
+            Some(Posto::Bot),
+            None,
+            None,
+        ];
+        let ok = |chi: &str, r: R, presente: bool, host: Option<&str>| {
+            permesso(&t, chi, &r, presente, host).is_ok()
+        };
+        let imp = || R::Imposta(Impostazioni::default());
+        // (request, creator, seated, spectator) with the creator present
+        let tabella = [
+            (imp(), true, false, false),
+            (R::Avvia, true, true, false),
+            (
+                R::Bot {
+                    posto: 2,
+                    aggiungi: true,
+                },
+                true,
+                true,
+                true,
+            ),
+            (
+                R::Bot {
+                    posto: 1,
+                    aggiungi: false,
+                },
+                true,
+                true,
+                false,
+            ),
+            (R::Siedi { posto: 2 }, true, true, true),
+            (R::Alzati { posto: 0 }, true, true, false),
+            (R::Alzati { posto: 1 }, true, true, true),
+            (R::Termina, true, true, false),
+            (R::Sostituisci { posto: 0 }, true, true, false),
+            (R::Prosegui, false, true, false),
+        ];
+        for (r, crea, seduto, spett) in tabella {
+            let visto = [
+                ok("crea", r.clone(), true, None),
+                ok("seduto", r.clone(), true, None),
+                ok("spett", r.clone(), true, None),
+            ];
+            assert_eq!(visto, [crea, seduto, spett], "{r:?}");
+        }
+        // settings: the host while the creator is away
+        assert!(ok("spett", imp(), false, Some("spett")));
+        assert!(!ok("spett", imp(), true, Some("spett")));
+        assert!(!ok("seduto", imp(), false, Some("spett")));
+        // moves: only the seat's human; system actions never
+        let gioca = |seat| R::Azione(bazzica_core::Azione::ChePalo { seat });
+        assert!(ok("seduto", gioca(0), true, None));
+        assert!(!ok("crea", gioca(0), true, None));
+        assert!(!ok(
+            "seduto",
+            R::Azione(bazzica_core::Azione::NuovaMano),
+            true,
+            None
+        ));
+        assert!(
+            !ok("seduto", R::Alzati { posto: 9 }, true, None),
+            "no such seat"
+        );
+    }
 
     #[test]
     fn il_ritmo_scala_il_ritardo() {

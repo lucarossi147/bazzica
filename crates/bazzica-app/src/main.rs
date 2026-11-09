@@ -71,6 +71,19 @@ pub const SENZA_REGIA: &str =
     "Non riesco a raggiungere la regia: aspetto che si ricolleghi qualcuno";
 
 impl Vista {
+    /// Whether this user may make request `r` (the same rule the host applies).
+    pub fn puo(&self, r: &Richiesta) -> bool {
+        let creatore_presente = self.connessi.contains(self.tavolo.creatore());
+        bazzica_net::tavolo::permesso(
+            &self.tavolo,
+            &self.io,
+            r,
+            creatore_presente,
+            self.host.as_deref(),
+        )
+        .is_ok()
+    }
+
     pub fn nome(&self, id: &str) -> String {
         self.tavolo
             .partecipante(id)

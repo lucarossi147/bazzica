@@ -60,7 +60,7 @@ use bazzica_core::{Azione, Evento, Fase, Mulberry32, Seat};
 use crate::protocollo::{Effimero, Messaggio, Regia, Richiesta, Sessione, VERSIONE_PROTOCOLLO};
 use crate::tavolo::{
     Errore, FRASI, IdGiocatore, Impostazioni, Partecipante, Posto, StatoTavolo, Tavolo, TipoTimer,
-    Voce,
+    Voce, permesso,
 };
 
 /// How far ahead of ours an epoch may be (a host claim, an entry, a snapshot).
@@ -1322,18 +1322,15 @@ impl<P: Clone + Ord> Nodo<P> {
             .tavolo
             .as_ref()
             .ok_or_else(|| Errore("Nessun tavolo".into()))?;
+        let creatore_presente = self.connessi().contains(t.creatore());
+        let host = self.host.as_ref().map(|h| h.id.as_str());
+        permesso(t, id, &r, creatore_presente, host)?;
         let voce = match r {
             Richiesta::Siedi { posto } => Voce::Siedi {
                 id: id.clone(),
                 posto,
             },
-            Richiesta::Alzati { posto } => {
-                let tuo = t.posti_di(id).contains(&posto);
-                if !(tuo || t.e_bot(posto) || id == t.creatore()) {
-                    return Err(Errore("Non puoi liberare questo posto".into()));
-                }
-                Voce::Alzati { posto }
-            }
+            Richiesta::Alzati { posto } => Voce::Alzati { posto },
             Richiesta::Bot { posto, aggiungi } => Voce::Bot { posto, aggiungi },
             Richiesta::Imposta(imp) => Voce::Imposta(imp),
             Richiesta::Avvia => Voce::Avvia {
@@ -1349,12 +1346,9 @@ impl<P: Clone + Ord> Nodo<P> {
                         "Partita in pausa: in attesa di riconnessione".into(),
                     ));
                 }
-                let seat = a
-                    .seat()
-                    .ok_or_else(|| Errore("Azione riservata al sistema".into()))?;
-                if !t.posti_di(id).contains(&seat) {
-                    return Err(Errore("Non controlli questo posto".into()));
-                }
+                let Some(seat) = a.seat() else {
+                    return Err(Errore("Azione riservata al sistema".into()));
+                };
                 if let Azione::ChePalo { .. } = a {
                     if st.fase == Fase::Scambio {
                         return Err(Errore("Durante lo scambio non si può parlare".into()));
@@ -1368,28 +1362,13 @@ impl<P: Clone + Ord> Nodo<P> {
                 Voce::Azione(a)
             }
             Richiesta::Prosegui => {
-                if !t.umani().contains(id) {
-                    return Err(Errore("Non sei seduto al tavolo".into()));
-                }
                 if t.ack.contains(id) {
                     return Ok(());
                 }
                 Voce::Prosegui { id: id.clone() }
             }
-            Richiesta::Termina => {
-                if id != t.creatore() && !t.umani().contains(id) {
-                    return Err(Errore(
-                        "Solo chi è seduto al tavolo può terminare la partita".into(),
-                    ));
-                }
-                Voce::Termina { da: id.clone() }
-            }
+            Richiesta::Termina => Voce::Termina { da: id.clone() },
             Richiesta::Sostituisci { posto } => {
-                if id != t.creatore() && !t.umani().contains(id) {
-                    return Err(Errore(
-                        "Solo chi è seduto al tavolo può sostituire un giocatore".into(),
-                    ));
-                }
                 let assente = match t.posti.get(usize::from(posto)) {
                     Some(Some(Posto::Umano { id: a })) => a.clone(),
                     _ => return Err(Errore("Nessun giocatore da sostituire".into())),
