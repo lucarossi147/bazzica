@@ -1290,3 +1290,47 @@ fn partizione_due_a_due() {
     assert_eq!(r.tavolo(c).n, n);
     assert_eq!(r.tavolo(d).n, n);
 }
+
+#[test]
+fn richiesta_al_vecchio_host_viene_rispedita() {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let b = r.unisci("b");
+    let c = r.unisci("c");
+    // c's request is lost on the way to a, then a leaves and b takes over
+    r.perdi(c, a, |m| matches!(m, Messaggio::Richiesta { .. }));
+    r.richiedi(c, Richiesta::Siedi { posto: 1 });
+    assert!(r.da_perdere.is_empty());
+    r.esci(a);
+    assert!(r.nodo(b).e_host());
+    for _ in 0..5 {
+        r.avanza(5_000);
+    }
+    assert_eq!(r.tavolo(b).posti_di("c"), [1], "applied by the new host");
+    let siedi = r
+        .voci
+        .iter()
+        .filter(|v| matches!(v, Voce::Siedi { id, .. } if id == "c"))
+        .count();
+    assert_eq!(siedi, 1, "exactly once");
+    assert!(r.rifiuti.is_empty(), "{:?}", r.rifiuti);
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn richiesta_duplicata_ignorata() {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let c = r.unisci("c");
+    // the same request (same rid) reaches the host twice
+    let msg = Messaggio::Richiesta {
+        rid: 1,
+        richiesta: Richiesta::Siedi { posto: 1 },
+    };
+    r.coda.push_back((c, a, msg.codifica()));
+    r.coda.push_back((c, a, msg.codifica()));
+    r.pompa();
+    assert_eq!(r.tavolo(a).posti_di("c"), [1]);
+    assert!(r.rifiuti.is_empty(), "{:?}", r.rifiuti);
+    r.assert_sincronizzati();
+}
