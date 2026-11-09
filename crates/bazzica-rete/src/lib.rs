@@ -2,6 +2,7 @@
 //!
 //! Works in the browser (WASM) and natively. See [`sessione::Sessione`].
 
+pub mod frammenti;
 pub mod ice;
 pub mod incontri;
 pub mod nostr;
