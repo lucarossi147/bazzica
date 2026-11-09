@@ -1694,3 +1694,30 @@ fn lo_spettatore_non_cambia_le_regole() {
     r.richiedi(b, Richiesta::Imposta(imp(Variante::Heisenberg)));
     assert_eq!(r.tavolo(b).impostazioni.variante, Variante::Heisenberg);
 }
+
+#[test]
+fn riconnettersi_non_ripete_entra() {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let lungo = Partecipante {
+        id: "b".into(),
+        nome: "  Un nome davvero troppo lungo per il tavolo  ".into(),
+        avatar: "non un avatar".into(),
+    };
+    let b = r.entra(Nodo::unisciti(lungo, 2, config()));
+    let entra = |r: &Rete| {
+        r.voci
+            .iter()
+            .filter(|v| matches!(v, Voce::Entra(p) if p.id == "b"))
+            .count()
+    };
+    assert_eq!(entra(&r), 1);
+    let avatar = r.tavolo(a).partecipante("b").unwrap().avatar.clone();
+    let mut b = b;
+    for _ in 0..3 {
+        let n = r.isola(b);
+        b = r.entra(n);
+    }
+    assert_eq!(entra(&r), 1, "a reconnection is not a new entry");
+    assert_eq!(r.tavolo(a).partecipante("b").unwrap().avatar, avatar);
+}

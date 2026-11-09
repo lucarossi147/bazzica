@@ -417,11 +417,7 @@ fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
             .collect()
     };
     // Bazzica calls and "che palo": buttons above the hand
-    let altre: Vec<Azione> = legali
-        .iter()
-        .filter(|a| matches!(a, Azione::Bazzica { .. } | Azione::ChePalo { .. }))
-        .cloned()
-        .collect();
+    let altre = azioni_extra(&legali, st.fase);
     // a card chosen ahead of time stays chosen until it leaves the hand
     if scelta().is_some_and(|c| !mano.contains(&c)) {
         scelta.set(None);
@@ -810,5 +806,44 @@ mod tests_sostituzione {
         t.sostituiti = [None, Some("b".into()), None, Some("b".into())];
         assert_eq!(seggi_da_riprendere(&t, "b"), [1, 3]);
         assert!(seggi_da_riprendere(&t, "a").is_empty());
+    }
+}
+
+/// The actions shown as buttons above the hand: Bazzica calls and "che palo". The engine lists
+/// "che palo" as legal during the exchange too, but the host refuses it there: no button.
+pub fn azioni_extra(legali: &[Azione], fase: Fase) -> Vec<Azione> {
+    legali
+        .iter()
+        .filter(|a| match a {
+            Azione::Bazzica { .. } => true,
+            Azione::ChePalo { .. } => fase != Fase::Scambio,
+            _ => false,
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests_azioni_extra {
+    use super::*;
+
+    #[test]
+    fn niente_che_palo_durante_lo_scambio() {
+        let legali = [
+            Azione::ChePalo { seat: 0 },
+            Azione::Bazzica {
+                seat: 0,
+                sette: None,
+            },
+            Azione::Attendi { seat: 0 },
+        ];
+        assert_eq!(azioni_extra(&legali, Fase::Gioco).len(), 2);
+        assert_eq!(
+            azioni_extra(&legali, Fase::Scambio),
+            [Azione::Bazzica {
+                seat: 0,
+                sette: None
+            }]
+        );
     }
 }
