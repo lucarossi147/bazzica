@@ -322,32 +322,22 @@ fn Giocate(vista: Vista, obs: Osservazione, chiudi: EventHandler<()>) -> Element
 #[component]
 fn Turno(vista: Vista, st: GameState, obs: Osservazione, seat: Seat) -> Element {
     let ctx = use_context::<Ctx>();
-    let imp = &vista.tavolo.impostazioni;
     let miei = vista.tavolo.posti_di(&vista.io);
     let mio = st.fase == Fase::Gioco && miei.contains(&st.corrente);
-    let (testo, durata) = match st.fase {
+    let testo = match st.fase {
         Fase::Scambio => {
-            let passata = st.scambio_passata[usize::from(seat)].is_some();
-            (
-                if passata {
-                    "Scambio: aspettiamo gli altri".to_string()
-                } else {
-                    format!(
-                        "Scambio: scegli la carta per {}",
-                        vista.tavolo.nome_posto((seat + 2) % 4)
-                    )
-                },
-                imp.timer_scambio,
-            )
+            if st.scambio_passata[usize::from(seat)].is_some() {
+                "Scambio: aspettiamo gli altri".to_string()
+            } else {
+                format!(
+                    "Scambio: scegli la carta per {}",
+                    vista.tavolo.nome_posto((seat + 2) % 4)
+                )
+            }
         }
         Fase::Gioco => {
-            let durata = if vista.tavolo.e_bot(st.corrente) {
-                0
-            } else {
-                imp.timer_giocata
-            };
             if mio {
-                ("Tocca a te".to_string(), durata)
+                "Tocca a te".to_string()
             } else {
                 let chi = st.corrente;
                 let verbo = if vista.tavolo.e_bot(chi) {
@@ -355,26 +345,25 @@ fn Turno(vista: Vista, st: GameState, obs: Osservazione, seat: Seat) -> Element 
                 } else {
                     "sta giocando"
                 };
-                (
-                    format!(
-                        "{} {} {verbo}",
-                        avatar_posto(&vista, usize::from(chi)),
-                        vista.tavolo.nome_posto(chi)
-                    ),
-                    durata,
+                format!(
+                    "{} {} {verbo}",
+                    avatar_posto(&vista, usize::from(chi)),
+                    vista.tavolo.nome_posto(chi)
                 )
             }
         }
-        Fase::FineMano => ("Fine della mano".to_string(), 0),
-        Fase::FinePartita => ("Partita finita".to_string(), 0),
+        Fase::FineMano => "Fine della mano".to_string(),
+        Fase::FinePartita => "Partita finita".to_string(),
     };
-    let restanti = if durata > 0 && vista.disconnessi.is_empty() {
-        let (_, inizio) = ctx.turno.read().clone();
-        let passati = ctx.ora.read().saturating_sub(inizio) / 1000;
-        Some(u64::from(durata).saturating_sub(passati))
-    } else {
-        None
-    };
+    // the host's own deadline (also after a takeover), not when this device saw the turn change
+    let adesso = *ctx.ora.read();
+    let restanti = ctx
+        .conn
+        .peek()
+        .as_ref()
+        .and_then(|c| crate::secondi_timer(c, adesso))
+        .filter(|_| vista.disconnessi.is_empty())
+        .map(|(_, _, secondi)| secondi);
     let altro = st.fase == Fase::Gioco && !mio;
     let classe = format!(
         "turno{}{}",

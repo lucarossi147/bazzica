@@ -700,6 +700,7 @@ fn impronta_diversa_forza_istantanea() {
         n: t.n + 1,
         voce,
         impronta: "deadbeefdeadbeef".into(),
+        timer: None,
     };
     r.coda.push_back((a, c, msg.codifica()));
     // the mismatching entry is never committed: c stays where it was until the snapshot
@@ -1095,6 +1096,7 @@ fn voce_duplicata_diversa_forza_resync() {
         n: t.n,
         voce: r.voci.last().unwrap().clone(),
         impronta: t.impronta(),
+        timer: None,
     };
     r.coda.push_back((a, c, msg.codifica()));
     r.pompa();
@@ -1720,4 +1722,25 @@ fn riconnettersi_non_ripete_entra() {
     }
     assert_eq!(entra(&r), 1, "a reconnection is not a new entry");
     assert_eq!(r.tavolo(a).partecipante("b").unwrap().avatar, avatar);
+}
+
+#[test]
+fn il_conto_alla_rovescia_segue_quello_della_regia() {
+    // the host only watches, so its leaving does not pause the game
+    let (mut r, a, b, _) = tavolo_host_spettatore();
+    fino_al_turno_di(&mut r, 0);
+    let host = r.nodo(a).timer().expect("b's play timer runs on the host");
+    assert_eq!(
+        r.nodo(b).timer(),
+        Some(host),
+        "the follower knows the host's deadline"
+    );
+    // after a takeover the new host's timer reaches the others with its next entry
+    r.esci(a);
+    let nuovo = r.host_h();
+    r.gioca_fino(r.tavolo(nuovo).n + 3);
+    let atteso = r.nodo(nuovo).timer();
+    for h in r.nodi.keys() {
+        assert_eq!(r.nodo(*h).timer(), atteso);
+    }
 }

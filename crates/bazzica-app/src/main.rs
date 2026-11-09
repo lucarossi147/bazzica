@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use bazzica_core::{Evento, Fase, Seat};
 use bazzica_net::tavolo::FRASI;
-use bazzica_net::{Effimero, IdGiocatore, Richiesta, StatoTavolo, Tavolo, Uscita, Voce};
+use bazzica_net::{Effimero, IdGiocatore, Richiesta, StatoTavolo, Tavolo, TipoTimer, Uscita, Voce};
 use bazzica_rete::matchbox::PeerId;
 use dioxus::prelude::*;
 use serde_json::json;
@@ -228,16 +228,21 @@ fn tocca_a_me(t: &Tavolo, io: &str) -> bool {
 }
 
 /// Seconds left on my turn, when it is my turn and the play timer is on.
-fn secondi_rimasti(c: &Connessione, ctx: Ctx, adesso: u64) -> Option<u64> {
-    let s = c.sessione.borrow();
-    let n = s.nodo();
-    let t = n.tavolo()?;
-    let durata = u64::from(t.impostazioni.timer_giocata);
-    if durata == 0 || n.in_pausa() || !tocca_a_me(t, &n.io().id) {
-        return None;
-    }
-    let inizio = ctx.turno.peek().1;
-    Some(durata.saturating_sub(adesso.saturating_sub(inizio) / 1000))
+fn secondi_rimasti(c: &Connessione, adesso: u64) -> Option<u64> {
+    let mio = {
+        let s = c.sessione.borrow();
+        let n = s.nodo();
+        !n.in_pausa() && n.tavolo().is_some_and(|t| tocca_a_me(t, &n.io().id))
+    };
+    mio.then(|| secondi_timer(c, adesso))
+        .flatten()
+        .map(|(_, _, secondi)| secondi)
+}
+
+/// The host's running timer as this device sees it: kind, seat, whole seconds left.
+pub fn secondi_timer(c: &Connessione, adesso: u64) -> Option<(TipoTimer, Option<Seat>, u64)> {
+    let (tipo, seat, fino) = c.sessione.borrow().nodo().timer()?;
+    Some((tipo, seat, fino.saturating_sub(adesso).div_ceil(1000)))
 }
 
 /// Engine events this device may see (private ones only for its own seats), as JSON.
@@ -407,7 +412,7 @@ fn App() -> Element {
             ctx.gestisci(&c, uscite);
             // last five seconds of my turn: tick
             if !nascosto
-                && let Some(rimasti) = secondi_rimasti(&c, ctx, adesso)
+                && let Some(rimasti) = secondi_rimasti(&c, adesso)
                 && (1..=5).contains(&rimasti)
                 && rimasti != ultimo_tic
             {
