@@ -55,6 +55,9 @@ pub fn Carta(
     carta: Card,
     #[props(default)] classe: String,
     #[props(default)] onclick: Option<EventHandler<()>>,
+    /// Tracked by the flying-card animations; off for thumbnails and tutorial examples.
+    #[props(default = true)]
+    traccia: bool,
 ) -> Element {
     let mazzo = (use_context::<Ctx>().mazzo)();
     let cliccabile = if onclick.is_some() { " cliccabile" } else { "" };
@@ -65,7 +68,7 @@ pub fn Carta(
             alt: carta.nome(),
             title: carta.nome(),
             draggable: "false",
-            "data-carta": carta.codice(),
+            "data-carta": traccia.then(|| carta.codice()),
             onclick: move |_| {
                 if let Some(f) = onclick {
                     f.call(());

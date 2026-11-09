@@ -3,10 +3,11 @@
 use bazzica_core::Variante;
 use bazzica_core::game::NOMI_POSTI;
 use bazzica_net::tavolo::AVATAR_BOT;
-use bazzica_net::{Impostazioni, Posto, Richiesta, StatoTavolo};
+use bazzica_net::{Impostazioni, Posto, Richiesta, Ritmo, StatoTavolo};
 use dioxus::prelude::*;
 
 use crate::carte::SceltaMazzo;
+use crate::guida::{Apertura, Guida};
 use crate::{Ctx, Vista, fx, link_tavolo, partita};
 
 #[component]
@@ -227,7 +228,11 @@ fn Regole(imp: Impostazioni) -> Element {
     let ctx = use_context::<Ctx>();
     let imposta = move |nuove: Impostazioni| ctx.richiedi(Richiesta::Imposta(nuove));
     let durate = [0u32, 10, 15, 20, 30, 45, 60, 90];
-    let (i1, i2, i3, i4, i5, i6) = (
+    let mut guida = use_signal(|| false);
+    let capitolo = bazzica_core::guida::capitolo(imp.variante);
+    let apertura = Apertura::per(imp.variante, imp.margherita);
+    let (i1, i2, i3, i4, i5, i6, i7) = (
+        imp.clone(),
         imp.clone(),
         imp.clone(),
         imp.clone(),
@@ -248,6 +253,11 @@ fn Regole(imp: Impostazioni) -> Element {
                 for v in Variante::TUTTE {
                     option { value: v.nome(), selected: v == imp.variante, "{v.nome()}" }
                 }
+            }
+            p { class: "desc-variante", "{capitolo.intro} " }
+            button { class: "piccolo secondario", onclick: move |_| guida.set(true), "Guida a {imp.variante.nome()}" }
+            if guida() {
+                Guida { apertura, chiudi: move |_| guida.set(false) }
             }
             label { class: "spunta",
                 input {
@@ -275,6 +285,17 @@ fn Regole(imp: Impostazioni) -> Element {
                             option { value: "{d}", selected: d == imp.timer_scambio, {durata(d)} }
                         }
                     }
+                }
+            }
+            label { "Velocità dei bot" }
+            select {
+                onchange: move |e| {
+                    if let Some(r) = Ritmo::da_nome(&e.value()) {
+                        imposta(Impostazioni { ritmo: r, ..i7.clone() });
+                    }
+                },
+                for r in Ritmo::TUTTI {
+                    option { value: r.nome(), selected: r == imp.ritmo, "{r.nome()}" }
                 }
             }
             div { class: "riga",

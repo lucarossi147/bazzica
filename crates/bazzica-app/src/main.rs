@@ -4,6 +4,7 @@
 mod carte;
 mod connessione;
 mod fx;
+mod guida;
 mod home;
 mod partita;
 mod profilo;

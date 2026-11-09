@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 
 use crate::carte::SceltaMazzo;
 use crate::connessione::Connessione;
+use crate::guida::{Apertura, Guida};
 use crate::{Ctx, codice_da_url, imposta_codice_url};
 
 #[component]
@@ -15,6 +16,7 @@ pub fn Home() -> Element {
     let mut codice = use_signal(|| codice_da_url().unwrap_or_default());
 
     let nome_ok = !profilo.read().nome.trim().is_empty();
+    let mut guida = use_signal(|| false);
 
     let entra = move |codice_tavolo: String, crea: bool| {
         let p = profilo.read().clone();
@@ -91,6 +93,10 @@ pub fn Home() -> Element {
                         "Entra"
                     }
                 }
+            }
+            button { class: "guida-link", onclick: move |_| guida.set(true), "Come si gioca" }
+            if guida() {
+                Guida { apertura: Apertura::tutto(), chiudi: move |_| guida.set(false) }
             }
             p { class: "nota",
                 "Su iPhone: Condividi → Aggiungi alla schermata Home per averla come app."
