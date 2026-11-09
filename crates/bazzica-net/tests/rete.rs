@@ -1109,3 +1109,60 @@ fn allineamento_scade() {
     r.gioca_fino(u64::MAX);
     r.assert_sincronizzati();
 }
+
+fn quanti_host(r: &Rete) -> usize {
+    r.nodi.values().filter(|n| n.e_host()).count()
+}
+
+#[test]
+fn stessa_identita_due_schede() {
+    let (mut r, a, _, _) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    // a second tab of a opens the same table
+    let a2 = r.unisci("a");
+    assert_eq!(quanti_host(&r), 1);
+    assert!(
+        !r.nodo(a).e_host() && !r.nodo(a2).e_host(),
+        "a host by id, not by election"
+    );
+    r.assert_sincronizzati();
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+    assert_eq!(r.tavolo(a2).stato, StatoTavolo::Finita);
+}
+
+#[test]
+fn host_ricarica_la_pagina() {
+    let (mut r, a, b, _) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    let epoca = r.nodo(b).epoca();
+    // the host reloads: the new page connects before the old link times out
+    let a2 = r.unisci("a");
+    assert_eq!(quanti_host(&r), 1);
+    assert!(
+        r.nodo(b).e_host() && r.nodo(b).epoca() > epoca,
+        "taken over by election"
+    );
+    r.esci(a);
+    assert_eq!(quanti_host(&r), 1);
+    r.assert_sincronizzati();
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+    assert!(!r.nodo(a2).e_host());
+}
+
+#[test]
+fn richieste_alla_sessione_giusta() {
+    let (mut r, a, b, _) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    let _a2 = r.unisci("a");
+    let host = r.host_h();
+    let n = r.tavolo(host).n;
+    // b's requests reach the live host, never the superseded tab
+    r.gioca_fino(n + 10);
+    assert!(r.tavolo(host).n >= n + 10);
+    assert!(!r.rifiuti.contains_key(&b), "{:?}", r.rifiuti);
+    assert!(r.inviati.iter().all(|(_, d, m)| *d != a
+        || !matches!(m, Messaggio::Richiesta { .. })
+        || r.nodo(a).e_host()));
+}
