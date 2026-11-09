@@ -78,7 +78,7 @@ impl Sessione {
         WebRtcSocket::builder(crate::nostr::normalizza_codice(codice))
             .signaller_builder(Arc::new(segnalatore))
             .ice_server(server_ice(turn))
-            .signaling_keep_alive_interval(Some(std::time::Duration::from_secs(5)))
+            .signaling_keep_alive_interval(Some(std::time::Duration::from_secs(15)))
             .reconnect_attempts(Some(3))
             .add_reliable_channel()
             .build()

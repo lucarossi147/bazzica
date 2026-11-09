@@ -23,11 +23,16 @@ use crate::ice::{DiagnosiCondivisa, aggiorna};
 use crate::nostr::{Chiavi, KIND_SEGNALE, Stanza, casuale};
 use crate::ws;
 
-/// Public relays tried by default (any that accept connections are used).
-pub const RELAY_PREDEFINITI: [&str; 4] = [
+/// Public relays tried by default (any that accept connections are used). Every envelope goes
+/// to all of them, so one working relay shared by two peers is enough: keep the list long,
+/// since public relays come and go, rate-limit, or accept connections yet drop events.
+pub const RELAY_PREDEFINITI: [&str; 7] = [
+    "wss://relay.snort.social",
+    "wss://offchain.pub",
+    "wss://nostr-pub.wellorder.net",
+    "wss://relay.primal.net",
     "wss://relay.damus.io",
     "wss://nos.lol",
-    "wss://relay.primal.net",
     "wss://nostr.mom",
 ];
 
@@ -172,6 +177,11 @@ impl NostrSignaller {
         match v.get(0)?.as_str()? {
             "EVENT" => {}
             "NOTICE" | "CLOSED" => {
+                log::warn!("relay: {frame}");
+                return None;
+            }
+            // a relay refusing our event (e.g. rate limit)
+            "OK" if v.get(2) == Some(&Value::Bool(false)) => {
                 log::warn!("relay: {frame}");
                 return None;
             }

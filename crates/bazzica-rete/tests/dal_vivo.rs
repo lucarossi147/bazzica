@@ -133,3 +133,42 @@ fn quattro_peer_su_nostr_e_webrtc() {
     );
     assert!(impronte.windows(2).all(|w| w[0] == w[1]), "{impronte:?}");
 }
+
+/// A player joining a table that already exists (its host has been alone in the room for a
+/// while) gets the replica.
+#[test]
+#[ignore]
+fn entra_in_un_tavolo_gia_creato() {
+    let codice = nuovo_codice();
+    let inizio = Instant::now();
+    let ora = || inizio.elapsed().as_millis() as u64;
+    let apri = |nodo| {
+        let (s, ciclo) = Sessione::apri(
+            &codice,
+            NostrSignallerBuilder::default(),
+            nodo,
+            Turn::di_compilazione(),
+        );
+        std::thread::spawn(move || smol::block_on(ciclo));
+        s
+    };
+    let mut host = apri(Nodo::crea(io("a"), Impostazioni::default(), 1, config()));
+    while inizio.elapsed() < Duration::from_secs(15) {
+        host.aggiorna(ora());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut ospite = apri(Nodo::unisciti(io("b"), 2, config()));
+    let t0 = Instant::now();
+    while !ospite.nodo().tavolo().is_some_and(|t| t.partecipanti.len() == 2) {
+        assert!(
+            t0.elapsed() < Duration::from_secs(30),
+            "timeout: host {:?}, guest {:?}",
+            host.diagnosi(),
+            ospite.diagnosi()
+        );
+        host.aggiorna(ora());
+        ospite.aggiorna(ora());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    println!("joined after {:?}", t0.elapsed());
+}

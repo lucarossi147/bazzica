@@ -271,7 +271,7 @@ mod tests {
 
     fn con_relay() -> Fatti {
         Fatti {
-            relay_totali: 4,
+            relay_totali: 7,
             relay_collegati: Some(3),
             ..Default::default()
         }
@@ -286,7 +286,7 @@ mod tests {
         };
         assert_eq!(ultimo(&nessuno).esito, Esito::Fallito);
         assert!(!serve_turn(&nessuno));
-        assert_eq!(passi(&con_relay())[0].testo, "Server di incontro: 3 di 4");
+        assert_eq!(passi(&con_relay())[0].testo, "Server di incontro: 3 di 7");
     }
 
     #[test]
