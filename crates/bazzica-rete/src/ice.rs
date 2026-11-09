@@ -2,8 +2,8 @@
 //!
 //! STUN only finds a direct route; between phones on different networks (mobile data,
 //! carrier NAT) there often is none, and only a TURN server relaying the traffic works.
-//! TURN credentials come from the build (`BAZZICA_TURN_*` environment variables, e.g. from
-//! GitHub secrets) or from the app's settings.
+//! TURN credentials come from the app's settings, else from the build (`BAZZICA_TURN_*`
+//! environment variables, e.g. from GitHub secrets), else the free Metered relay below.
 
 use std::sync::{Arc, Mutex};
 
@@ -14,6 +14,15 @@ use serde::{Deserialize, Serialize};
 pub const STUN: [&str; 2] = [
     "stun:stun.l.google.com:19302",
     "stun:stun.cloudflare.com:3478",
+];
+
+/// Free Metered relay (500 MB/month) used when the build sets no `BAZZICA_TURN_URLS`.
+/// Public by nature: it ships in the web app anyway.
+pub const METERED: [&str; 3] = [
+    "turn:global.relay.metered.ca:80 turn:global.relay.metered.ca:80?transport=tcp \
+     turn:global.relay.metered.ca:443 turns:global.relay.metered.ca:443?transport=tcp",
+    "68705ead3405f5627b722a3e",
+    "FUe4ZPtAnsM4wKBn",
 ];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,13 +50,26 @@ impl Turn {
         })
     }
 
-    /// The one baked into this build, if any.
+    /// The one baked into this build: the `BAZZICA_TURN_*` variables, else [`METERED`].
     pub fn di_compilazione() -> Option<Turn> {
-        Turn::nuovo(
-            option_env!("BAZZICA_TURN_URLS")?,
-            option_env!("BAZZICA_TURN_USERNAME").unwrap_or_default(),
-            option_env!("BAZZICA_TURN_CREDENTIAL").unwrap_or_default(),
-        )
+        Turn::da_ambiente([
+            option_env!("BAZZICA_TURN_URLS"),
+            option_env!("BAZZICA_TURN_USERNAME"),
+            option_env!("BAZZICA_TURN_CREDENTIAL"),
+        ])
+    }
+
+    /// The build's relay when its URLs are set and non-blank (CI passes unset secrets as
+    /// empty strings), else [`METERED`].
+    fn da_ambiente([urls, utente, segreto]: [Option<&str>; 3]) -> Option<Turn> {
+        match urls.filter(|u| !u.trim().is_empty()) {
+            Some(urls) => Turn::nuovo(
+                urls,
+                utente.unwrap_or_default(),
+                segreto.unwrap_or_default(),
+            ),
+            None => Turn::nuovo(METERED[0], METERED[1], METERED[2]),
+        }
     }
 }
 
@@ -110,6 +132,27 @@ mod tests {
         );
         assert_eq!(Turn::nuovo("stun:x:1", "u", "p"), None);
         assert_eq!(Turn::nuovo("  ", "u", "p"), None);
+    }
+
+    #[test]
+    fn turn_di_compilazione() {
+        let metered = Turn::da_ambiente([None; 3]).unwrap();
+        assert_eq!(metered.urls.len(), 4);
+        assert_eq!(metered.username, METERED[1]);
+        assert_eq!(
+            Turn::da_ambiente([Some(" "), Some(""), Some("")]),
+            Some(metered)
+        );
+        let proprio = Turn::da_ambiente([Some("turn:mio:3478"), Some("u"), None]).unwrap();
+        assert_eq!(
+            proprio,
+            Turn {
+                urls: vec!["turn:mio:3478".into()],
+                username: "u".into(),
+                credential: "".into()
+            }
+        );
+        assert!(Turn::di_compilazione().is_some());
     }
 
     #[test]

@@ -31,7 +31,7 @@ jobs:
         working-directory: crates/bazzica-app
         run: dx bundle --platform web --release
         # optional TURN relay for players on different networks (Settings > Secrets > Actions);
-        # without these secrets the app uses STUN only
+        # without these secrets the app uses the free Metered relay in bazzica-rete/src/ice.rs
         env:
           BAZZICA_TURN_URLS: ${{ secrets.BAZZICA_TURN_URLS }}
           BAZZICA_TURN_USERNAME: ${{ secrets.BAZZICA_TURN_USERNAME }}
