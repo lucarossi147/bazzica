@@ -236,9 +236,14 @@ impl Rete {
         true
     }
 
-    /// Delivers everything until the network is quiet, then checks the invariants.
+    /// Delivers everything until the network is quiet. I1 is checked after every message,
+    /// I2 once the network is quiet.
     fn pompa(&mut self) {
-        while self.raccogli() | self.consegna_uno() {}
+        while self.raccogli() | self.consegna_uno() {
+            for n in self.nodi.values() {
+                n.verifica_invarianti().unwrap();
+            }
+        }
         self.verifica_invarianti();
     }
 
@@ -654,6 +659,10 @@ fn impronta_diversa_forza_istantanea() {
         impronta: "deadbeefdeadbeef".into(),
     };
     r.coda.push_back((a, c, msg.codifica()));
+    // the mismatching entry is never committed: c stays where it was until the snapshot
+    assert!(r.consegna_uno());
+    assert_eq!(r.tavolo(c), &t, "the replica moved before the hash check");
+    r.nodo(c).verifica_invarianti().unwrap();
     r.pompa();
     r.assert_sincronizzati();
     assert_eq!(r.tavolo(c).n, t.n);
