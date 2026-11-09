@@ -30,6 +30,7 @@ enum Finestra {
 
 #[component]
 pub fn Partita(vista: Vista) -> Element {
+    let ctx = use_context::<Ctx>();
     let t = &vista.tavolo;
     let st = t.partita.as_ref().expect("game in progress");
     let miei = t.posti_di(&vista.io);
@@ -65,9 +66,16 @@ pub fn Partita(vista: Vista) -> Element {
                 div { class: "banner", "{crate::SENZA_REGIA}" }
             }
             if !vista.disconnessi.is_empty() && !finita {
+                Pausa { vista: vista.clone() }
+            }
+            for posto in seggi_da_riprendere(t, &vista.io) {
                 div { class: "banner",
-                    "In pausa: aspettiamo "
-                    {vista.disconnessi.iter().map(|id| vista.nome(id)).collect::<Vec<_>>().join(", ")}
+                    "Un bot gioca al tuo posto. "
+                    button {
+                        class: "piccolo",
+                        onclick: move |_| ctx.richiedi(Richiesta::Riprendi { posto }),
+                        "Riprendi il posto"
+                    }
                 }
             }
             if !spettatore && !finita {
@@ -738,5 +746,65 @@ mod tests {
         for io in 0..4 {
             assert_eq!(relativo(io, io), 0);
         }
+    }
+}
+
+/// Seats a bot took over from `io` during the game (it may take them back).
+pub fn seggi_da_riprendere(t: &bazzica_net::Tavolo, io: &str) -> Vec<Seat> {
+    (0..4u8)
+        .filter(|&s| t.sostituiti[usize::from(s)].as_deref() == Some(io))
+        .collect()
+}
+
+/// The game is paused for missing players; after a while each can be replaced by a bot.
+#[component]
+fn Pausa(vista: Vista) -> Element {
+    let ctx = use_context::<Ctx>();
+    // re-checked as time passes: replacing becomes possible after a delay
+    let _ = ctx.ora.read();
+    let sostituibili = ctx
+        .conn
+        .peek()
+        .as_ref()
+        .map(|c| c.sessione.borrow().nodo().sostituibili())
+        .unwrap_or_default();
+    let assenti = vista
+        .disconnessi
+        .iter()
+        .map(|id| vista.nome(id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    rsx! {
+        div { class: "banner",
+            "In pausa: aspettiamo {assenti}"
+            for id in sostituibili {
+                for posto in vista.tavolo.posti_di(&id) {
+                    button {
+                        class: "piccolo",
+                        onclick: move |_| ctx.richiedi(Richiesta::Sostituisci { posto }),
+                        "Sostituisci {vista.nome(&id)} con un bot"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_sostituzione {
+    use super::*;
+    use bazzica_net::{Impostazioni, Partecipante, Tavolo};
+
+    #[test]
+    fn solo_i_propri_posti_si_riprendono() {
+        let io = Partecipante {
+            id: "a".into(),
+            nome: "A".into(),
+            avatar: "🦊".into(),
+        };
+        let mut t = Tavolo::nuovo(io, Impostazioni::default());
+        t.sostituiti = [None, Some("b".into()), None, Some("b".into())];
+        assert_eq!(seggi_da_riprendere(&t, "b"), [1, 3]);
+        assert!(seggi_da_riprendere(&t, "a").is_empty());
     }
 }

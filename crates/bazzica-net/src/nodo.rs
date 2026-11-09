@@ -52,7 +52,8 @@ use bazzica_core::{Azione, Evento, Fase, Mulberry32, Seat};
 
 use crate::protocollo::{Effimero, Messaggio, Regia, Richiesta, Sessione, VERSIONE_PROTOCOLLO};
 use crate::tavolo::{
-    Errore, FRASI, IdGiocatore, Impostazioni, Partecipante, StatoTavolo, Tavolo, TipoTimer, Voce,
+    Errore, FRASI, IdGiocatore, Impostazioni, Partecipante, Posto, StatoTavolo, Tavolo, TipoTimer,
+    Voce,
 };
 
 /// Why a superseded node refuses everything.
@@ -72,6 +73,8 @@ pub struct Config {
     pub attesa_allineamento_ms: u64,
     /// How long a request may go unacknowledged before it is sent again, in ms.
     pub attesa_richiesta_ms: u64,
+    /// How long a seated human must be away before a bot may take their seat, in ms.
+    pub attesa_sostituzione_ms: u64,
 }
 
 impl Default for Config {
@@ -83,6 +86,7 @@ impl Default for Config {
             attesa_istantanea_ms: 3000,
             attesa_allineamento_ms: 2000,
             attesa_richiesta_ms: 3000,
+            attesa_sostituzione_ms: 60_000,
         }
     }
 }
@@ -196,6 +200,8 @@ pub struct Nodo<P> {
     sessione: Sessione,
     /// A newer session of our identity took over: this node stops acting.
     sostituito: bool,
+    /// Since when each seated human has been away (ms), by this node's observation.
+    assenti_dal: BTreeMap<IdGiocatore, u64>,
     /// Who the host last reported connected (itself included): elections need a strict
     /// majority of it. Empty until the first report.
     presenti: BTreeSet<IdGiocatore>,
@@ -251,6 +257,7 @@ impl<P: Clone + Ord> Nodo<P> {
             },
             sostituito: false,
             presenti: BTreeSet::new(),
+            assenti_dal: BTreeMap::new(),
             tavolo: None,
             log: vec![],
             log_base: 0,
@@ -343,6 +350,27 @@ impl<P: Clone + Ord> Nodo<P> {
         t.umani().into_iter().filter(|id| !c.contains(id)).collect()
     }
 
+    /// Seated humans away long enough for a bot to take their seat.
+    pub fn sostituibili(&self) -> Vec<IdGiocatore> {
+        self.disconnessi()
+            .into_iter()
+            .filter(|id| {
+                self.assenti_dal
+                    .get(id)
+                    .is_some_and(|&dal| self.ora >= dal + self.config.attesa_sostituzione_ms)
+            })
+            .collect()
+    }
+
+    /// Keeps track of since when each seated human is away.
+    fn aggiorna_assenze(&mut self) {
+        let assenti: BTreeSet<IdGiocatore> = self.disconnessi().into_iter().collect();
+        self.assenti_dal.retain(|id, _| assenti.contains(id));
+        for id in assenti {
+            self.assenti_dal.entry(id).or_insert(self.ora);
+        }
+    }
+
     pub fn in_pausa(&self) -> bool {
         self.tavolo
             .as_ref()
@@ -432,6 +460,7 @@ impl<P: Clone + Ord> Nodo<P> {
     pub fn disconnesso(&mut self, ora: u64, p: &P) {
         self.orologio(ora);
         self.scollega(p);
+        self.aggiorna_assenze();
     }
 
     /// Forgets peer `p` (gone, or superseded by a newer session of the same identity).
@@ -466,6 +495,7 @@ impl<P: Clone + Ord> Nodo<P> {
 
     pub fn tick(&mut self, ora: u64) {
         self.orologio(ora);
+        self.aggiorna_assenze();
         if self.sostituito {
             return;
         }
@@ -590,6 +620,7 @@ impl<P: Clone + Ord> Nodo<P> {
     pub fn ricevi(&mut self, ora: u64, p: P, msg: Messaggio) {
         self.orologio(ora);
         self.ricevi_messaggio(p, msg);
+        self.aggiorna_assenze();
         self.controlla();
     }
 
@@ -1324,6 +1355,27 @@ impl<P: Clone + Ord> Nodo<P> {
                 }
                 Voce::Termina { da: id.clone() }
             }
+            Richiesta::Sostituisci { posto } => {
+                if id != t.creatore() && !t.umani().contains(id) {
+                    return Err(Errore(
+                        "Solo chi è seduto al tavolo può sostituire un giocatore".into(),
+                    ));
+                }
+                let assente = match t.posti.get(usize::from(posto)) {
+                    Some(Some(Posto::Umano { id: a })) => a.clone(),
+                    _ => return Err(Errore("Nessun giocatore da sostituire".into())),
+                };
+                if !self.sostituibili().contains(&assente) {
+                    return Err(Errore(
+                        "Aspetta ancora un po': potrebbe ricollegarsi".into(),
+                    ));
+                }
+                Voce::Sostituisci { posto }
+            }
+            Richiesta::Riprendi { posto } => Voce::Riprendi {
+                posto,
+                id: id.clone(),
+            },
         };
         self.aggiungi(voce)
     }
@@ -1380,6 +1432,7 @@ impl<P: Clone + Ord> Nodo<P> {
                 let secondi = match k.tipo {
                     TipoTimer::Scambio => t.impostazioni.timer_scambio,
                     TipoTimer::Giocata => t.impostazioni.timer_giocata,
+                    TipoTimer::FineMano => t.impostazioni.timer_fine_mano,
                 };
                 (k, self.ora + u64::from(secondi) * 1000)
             });
@@ -1419,6 +1472,8 @@ impl<P: Clone + Ord> Nodo<P> {
         let mut rng = Mulberry32::new(self.seme_decisione());
         let mut azioni = vec![];
         match k.tipo {
+            // the summary waited long enough: everyone counts as having seen it (no actions)
+            TipoTimer::FineMano => {}
             TipoTimer::Scambio => {
                 // whoever has not passed yet passes a random card
                 for s in 0..4 {
@@ -1450,7 +1505,7 @@ impl<P: Clone + Ord> Nodo<P> {
                 }
             }
         }
-        if azioni.is_empty() {
+        if azioni.is_empty() && k.tipo != TipoTimer::FineMano {
             return self.ripianifica();
         }
         self.aggiungi(Voce::Scaduto {
@@ -1489,6 +1544,15 @@ fn bot_da_far_agire(t: &Tavolo) -> Option<(Seat, bool)> {
 fn chiave_timer(t: &Tavolo) -> Option<ChiaveTimer> {
     let st = t.partita.as_ref()?;
     let imp = &t.impostazioni;
+    if st.fase == Fase::FineMano && imp.timer_fine_mano > 0 && !t.umani().is_subset(&t.ack) {
+        return Some(ChiaveTimer {
+            tipo: TipoTimer::FineMano,
+            mano: st.mano_n,
+            turno: st.turno,
+            giocate: 0,
+            seat: None,
+        });
+    }
     if st.fase == Fase::Scambio && imp.timer_scambio > 0 {
         return Some(ChiaveTimer {
             tipo: TipoTimer::Scambio,

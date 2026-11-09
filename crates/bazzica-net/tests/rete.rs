@@ -47,6 +47,7 @@ fn config() -> Config {
         attesa_istantanea_ms: 500,
         attesa_allineamento_ms: 1000,
         attesa_richiesta_ms: 1000,
+        attesa_sostituzione_ms: 60_000,
     }
 }
 
@@ -1427,5 +1428,71 @@ fn fine_mano_scade() {
     }
     let st = r.tavolo(a).partita.clone().unwrap();
     assert!(st.mano_n > mano, "still waiting at the end of hand {mano}");
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn fine_mano_senza_timer_aspetta() {
+    let (mut r, a, _, _) = tavolo_tipico(Variante::Vanilla);
+    r.richiedi(a, Richiesta::Termina);
+    r.richiedi(
+        a,
+        Richiesta::Imposta(Impostazioni {
+            timer_fine_mano: 0,
+            ..imp(Variante::Vanilla)
+        }),
+    );
+    r.richiedi(a, Richiesta::Avvia);
+    fino_a_fine_mano(&mut r);
+    for _ in 0..10 {
+        r.avanza(3_600_000);
+    }
+    let st = r.tavolo(a).partita.clone().unwrap();
+    assert_eq!(
+        (st.fase, st.mano_n),
+        (Fase::FineMano, 1),
+        "waits for everyone"
+    );
+}
+
+#[test]
+fn giocatore_sparito_sostituito() {
+    let (mut r, a, b, _) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    r.esci(b);
+    assert!(r.nodo(a).in_pausa());
+    // too early: b may still come back
+    r.richiedi(a, Richiesta::Sostituisci { posto: 2 });
+    assert_eq!(
+        r.rifiuti[&a].last().unwrap(),
+        "Aspetta ancora un po': potrebbe ricollegarsi"
+    );
+    r.avanza(config().attesa_sostituzione_ms);
+    assert_eq!(r.nodo(a).sostituibili(), ["b"]);
+    r.richiedi(a, Richiesta::Sostituisci { posto: 2 });
+    let t = r.tavolo(a);
+    assert!(t.e_bot(2) && t.sostituiti[2].as_deref() == Some("b"));
+    assert!(!r.nodo(a).in_pausa());
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+    assert_eq!(r.tavolo(a).stato, StatoTavolo::Finita);
+}
+
+#[test]
+fn giocatore_torna_e_riprende_il_posto() {
+    let (mut r, a, b, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    r.esci(b);
+    r.avanza(config().attesa_sostituzione_ms);
+    r.richiedi(a, Richiesta::Sostituisci { posto: 2 });
+    r.gioca_fino(40);
+    // c never sat there: refused; b comes back and takes its seat again
+    r.richiedi(c, Richiesta::Riprendi { posto: 2 });
+    assert_eq!(r.rifiuti[&c].last().unwrap(), "Questo posto non era tuo");
+    let b2 = r.unisci("b");
+    r.richiedi(b2, Richiesta::Riprendi { posto: 2 });
+    assert_eq!(r.tavolo(a).posti_di("b"), [2]);
+    assert!(r.tavolo(a).sostituiti[2].is_none());
+    r.gioca_fino(u64::MAX);
     r.assert_sincronizzati();
 }

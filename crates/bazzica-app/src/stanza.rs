@@ -236,6 +236,7 @@ fn Regole(imp: Impostazioni) -> Element {
     let mut guida = use_signal(|| false);
     let capitolo = bazzica_core::guida::capitolo(imp.variante);
     let apertura = Apertura::per(imp.variante, imp.margherita);
+    let i8 = imp.clone();
     let (i1, i2, i3, i4, i5, i6, i7) = (
         imp.clone(),
         imp.clone(),
@@ -288,6 +289,15 @@ fn Regole(imp: Impostazioni) -> Element {
                         onchange: move |e| imposta(Impostazioni { timer_scambio: e.value().parse().unwrap_or(30), ..i4.clone() }),
                         for d in durate {
                             option { value: "{d}", selected: d == imp.timer_scambio, {durata(d)} }
+                        }
+                    }
+                }
+                div {
+                    label { "Attesa a fine mano" }
+                    select {
+                        onchange: move |e| imposta(Impostazioni { timer_fine_mano: e.value().parse().unwrap_or(30), ..i8.clone() }),
+                        for d in durate {
+                            option { value: "{d}", selected: d == imp.timer_fine_mano, {durata(d)} }
                         }
                     }
                 }
