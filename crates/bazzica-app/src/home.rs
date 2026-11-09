@@ -48,6 +48,10 @@ pub fn Home() -> Element {
         div { class: "schermo centrato",
             h1 { class: "logo", "Bazzica" }
             p { class: "sottotitolo", "Il gioco di carte, tra amici, senza server." }
+            button { class: "guida-link", onclick: move |_| guida.set(true), "Come si gioca" }
+            if guida() {
+                Guida { apertura: Apertura::tutto(), chiudi: move |_| guida.set(false) }
+            }
             div { class: "pannello",
                 label { "Il tuo nome" }
                 input {
@@ -93,10 +97,6 @@ pub fn Home() -> Element {
                         "Entra"
                     }
                 }
-            }
-            button { class: "guida-link", onclick: move |_| guida.set(true), "Come si gioca" }
-            if guida() {
-                Guida { apertura: Apertura::tutto(), chiudi: move |_| guida.set(false) }
             }
             p { class: "nota",
                 "Su iPhone: Condividi → Aggiungi alla schermata Home per averla come app."

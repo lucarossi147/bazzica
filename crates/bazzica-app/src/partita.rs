@@ -261,7 +261,7 @@ fn Centro(vista: Vista, obs: Osservazione, apri: EventHandler<Finestra>) -> Elem
                 span { class: "sq{s % 2}", "{vista.tavolo.nome_posto(s)}" }
                 " ha giocato {carta.nome()}"
                 if !presa.is_empty() { " e preso {nomi(&presa)}" }
-                span { class: "freccia", " · tutte le giocate" }
+                span { class: "freccia", "Tutte le giocate della mano" }
             }
         }
     }
@@ -433,9 +433,11 @@ fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
     };
     let ricevuta = st.scambio_ricevuta[usize::from(seat)];
     let in_attesa = scelta().is_some() && opzioni.is_empty() && st.fase == Fase::Gioco;
+    // while a choice is open its panel takes the place of the extra buttons
+    let scegliendo = da_confermare().is_some() || !opzioni.is_empty();
     rsx! {
         div { class: "mano",
-            if !altre.is_empty() {
+            if !altre.is_empty() && !scegliendo {
                 div { class: "azioni-extra",
                     for a in altre {
                         button {
@@ -487,7 +489,9 @@ fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
             if in_attesa {
                 p { class: "suggerimento", "Carta scelta: quando tocca a te ti chiedo conferma." }
             }
-            Chiacchiere { st: st.clone(), seat }
+            if !scegliendo {
+                Chiacchiere { st: st.clone(), seat }
+            }
             div { class: "carte-mano", "data-seat": "{seat}",
                 for c in mano {
                     Carta {

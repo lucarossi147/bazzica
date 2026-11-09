@@ -16,8 +16,8 @@
   --team1-light: #ffb59a;
   /* card widths follow both the width and the height of the screen (cards are 3:5) */
   --cw: clamp(40px, min(18vw, 12.5dvh), 100px);  /* in hand */
-  --tw: clamp(32px, min(13vw, 8.5dvh), 84px);    /* on the table */
-  --mw: clamp(12px, min(4.2vw, 3dvh), 26px);     /* opponents' backs */
+  --tw: clamp(32px, min(15vw, 9.5dvh), 88px);    /* on the table */
+  --mw: clamp(12px, min(6.5vw, 3.6dvh), 30px);   /* opponents' backs */
   color-scheme: light;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color: var(--ink);
@@ -161,9 +161,9 @@ button.icona { font-size: 11px; padding: 2px 8px; background: rgba(255,255,255,.
 .tavola .vuota { color: var(--cream); opacity: .5; font-size: 12px; }
 .dettagli { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 4px; font-size: 11px; color: var(--cream); opacity: .9; }
 .dettagli .sq0 { color: var(--team0-light); } .dettagli .sq1 { color: var(--team1-light); }
-button.ultima { font-size: 11px; color: var(--gold); background: none; padding: 2px 4px; text-align: center; max-width: 100%; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+button.ultima { font-size: 11px; color: var(--gold); background: none; padding: 2px 4px; text-align: center; max-width: 100%; line-height: 1.35; }
 button.ultima .sq0 { color: var(--team0-light); } button.ultima .sq1 { color: var(--team1-light); }
-button.ultima .freccia { color: var(--cream); opacity: .7; text-decoration: underline; text-underline-offset: 2px; }
+button.ultima .freccia { display: block; color: var(--cream); opacity: .75; text-decoration: underline; text-underline-offset: 2px; }
 
 /* pinned at the bottom */
 .turno { display: flex; justify-content: center; align-items: center; gap: 8px; color: var(--cream); font-weight: 600; font-size: 14px; padding: 3px 8px; flex: none; min-height: 30px; }
@@ -180,8 +180,8 @@ button.ultima .freccia { color: var(--cream); opacity: .7; text-decoration: unde
 button.speciale { background: var(--gold); color: var(--wood-dark); font-weight: 700; }
 button.speciale.palo { background: rgba(255,255,255,.14); color: var(--cream); font-weight: 600; }
 
-/* capture choices float above the hand instead of pushing it off screen */
-.opzioni { position: fixed; left: 8px; right: 8px; bottom: calc(var(--cw) * 1.67 + 24px + env(safe-area-inset-bottom)); margin: 0 auto; max-width: 460px; max-height: 55dvh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; background: var(--panel); border-radius: 12px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.45); z-index: 20; }
+/* choices sit right above the hand; the table shrinks to make room, the turn line stays visible */
+.opzioni { width: 100%; max-width: 460px; max-height: 40dvh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; background: var(--panel); border-radius: 12px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.45); z-index: 20; }
 button.opzione { background: var(--felt); text-align: left; font-size: 15px; padding: 9px 12px; }
 
 .velo { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: grid; place-items: center; padding: 12px; z-index: 30; }
@@ -223,7 +223,6 @@ summary { cursor: pointer; color: var(--muted); }
   .turno { grid-column: 2; grid-row: 3; align-self: end; flex-wrap: wrap; }
   .mano { grid-column: 2; grid-row: 4; max-width: 46vw; }
   .carte-mano { padding-top: 6px; }
-  .opzioni { left: auto; right: 8px; width: min(420px, 60vw); bottom: calc(var(--cw) * 1.67 + 16px); }
 }
 
 @media (min-width: 700px) {
@@ -272,7 +271,7 @@ button.guida-link { background: none; color: var(--gold); text-decoration: under
 .finestra.guida .testo { line-height: 1.5; margin: 0 0 10px; }
 .finestra.guida .intro { font-family: Georgia, serif; font-style: italic; color: var(--muted); margin: 10px 0 0; }
 button.chiudi { position: absolute; top: 6px; right: 6px; background: none; color: var(--muted); font-size: 22px; padding: 2px 10px; }
-.capitoli { display: flex; gap: 6px; overflow-x: auto; padding: 2px 36px 6px 0; scrollbar-width: thin; }
+.capitoli { display: flex; gap: 6px; overflow-x: auto; padding: 2px 0 6px; margin-right: 34px; scrollbar-width: thin; }
 button.capitolo { flex: none; font-size: 13px; padding: 5px 10px; background: #efe6cf; color: var(--ink); border-radius: 999px; }
 button.capitolo.scelto { background: var(--felt); color: #fff; }
 .esempio { background: var(--felt); border-radius: 12px; padding: 10px; color: var(--cream); display: flex; flex-direction: column; gap: 8px; }
@@ -300,3 +299,14 @@ button:focus-visible, select:focus-visible, input:focus-visible, .carta.cliccabi
   .giocatore.di-turno, .turno.mio .chi-gioca, .puntini-attesa::after { animation: none; }
   .carta.in-mano, .tavola { transition: none; }
 }
+
+/* ---------- joining a table ---------- */
+.passi-collegamento { list-style: none; margin: 10px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.passi-collegamento li { position: relative; padding-left: 26px; font-size: 14px; line-height: 1.4; }
+.passi-collegamento li::before { position: absolute; left: 0; top: 0; width: 18px; text-align: center; font-weight: 700; }
+.passi-collegamento li.fatto::before { content: "✓"; color: var(--felt); }
+.passi-collegamento li.in-corso { color: var(--muted); }
+.passi-collegamento li.in-corso::before { content: "…"; color: var(--muted); }
+.passi-collegamento li.fallito { color: var(--red); }
+.passi-collegamento li.fallito::before { content: "!"; color: var(--red); }
+.server-turn .riga { margin-top: 8px; }
