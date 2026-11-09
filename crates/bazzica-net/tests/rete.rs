@@ -1397,3 +1397,35 @@ fn doppio_tocco_una_sola_richiesta() {
     assert!(r.rifiuti.is_empty(), "{:?}", r.rifiuti);
     assert_eq!(r.nodo(b).richieste_in_corso(), 0, "acknowledged");
 }
+
+/// Plays (humans answering at once, but never acknowledging) until the first hand ends.
+fn fino_a_fine_mano(r: &mut Rete) {
+    for _ in 0..10_000 {
+        let t = r.tavolo(r.host_h()).clone();
+        if t.partita.as_ref().unwrap().fase == Fase::FineMano {
+            return;
+        }
+        let handles: Vec<H> = r.nodi.keys().copied().collect();
+        if !handles
+            .into_iter()
+            .fold(false, |m, h| r.gioca_umani(h, false) | m)
+        {
+            r.avanza(10_000);
+        }
+    }
+    panic!("the hand never ended");
+}
+
+#[test]
+fn fine_mano_scade() {
+    let (mut r, a, _, _) = tavolo_tipico(Variante::Vanilla);
+    fino_a_fine_mano(&mut r);
+    let mano = r.tavolo(a).partita.as_ref().unwrap().mano_n;
+    // nobody acknowledges the summary: after the timer the next hand starts anyway
+    for _ in 0..10 {
+        r.avanza(60_000);
+    }
+    let st = r.tavolo(a).partita.clone().unwrap();
+    assert!(st.mano_n > mano, "still waiting at the end of hand {mano}");
+    r.assert_sincronizzati();
+}
