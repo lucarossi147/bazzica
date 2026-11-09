@@ -129,7 +129,7 @@ impl Rete {
     }
 
     fn unisci(&mut self, id: &str) -> H {
-        let seme = id.bytes().map(u64::from).sum();
+        let seme = id.bytes().map(u64::from).sum::<u64>() + 1000 * u64::from(self.prossimo);
         self.entra(Nodo::unisciti(io(id), seme, config()))
     }
 
@@ -288,17 +288,21 @@ impl Rete {
         self.pompa();
     }
 
+    /// Nodes still acting (a tab superseded by a newer one of the same identity is frozen).
+    fn attivi(&self) -> impl Iterator<Item = &Nodo<H>> {
+        self.nodi.values().filter(|n| !n.sostituito())
+    }
+
     fn assert_sincronizzati(&self) {
         let impronte: BTreeSet<(u64, String)> = self
-            .nodi
-            .values()
+            .attivi()
             .map(|n| {
                 let t = n.tavolo().expect("replica");
                 (t.n, t.impronta())
             })
             .collect();
         assert_eq!(impronte.len(), 1, "replicas differ: {impronte:?}");
-        let host: BTreeSet<_> = self.nodi.values().map(|n| n.host().cloned()).collect();
+        let host: BTreeSet<_> = self.attivi().map(|n| n.host().cloned()).collect();
         assert_eq!(host.len(), 1, "peers disagree on the host: {host:?}");
     }
 
@@ -306,7 +310,7 @@ impl Rete {
     fn gioca_umani(&mut self, h: H, ack: bool) -> bool {
         let n = self.nodo(h);
         let t = n.tavolo().unwrap();
-        if t.stato != StatoTavolo::InCorso || n.in_pausa() {
+        if t.stato != StatoTavolo::InCorso || n.in_pausa() || n.sostituito() {
             return false;
         }
         let st = t.partita.as_ref().unwrap();
@@ -461,7 +465,10 @@ fn partita_completa_tra_quattro_peer() {
         // snapshots must fit in one WebRTC message (Safari: 64 KiB to be safe)
         let istantanea = Messaggio::Istantanea {
             epoca: 0,
-            host: "a".into(),
+            host: Regia {
+                id: "a".into(),
+                sessione: Sessione::default(),
+            },
             tavolo: Box::new(t.clone()),
         };
         let dim = istantanea.codifica().len();
@@ -625,6 +632,7 @@ fn versione_diversa_viene_segnalata() {
         Messaggio::Ciao {
             versione: VERSIONE_PROTOCOLLO + 1,
             io: io("b"),
+            sessione: Sessione::default(),
             replica: true,
         },
     );
@@ -931,7 +939,7 @@ fn devia(r: &mut Rete, c: H) -> H {
     falso.impostazioni.nome = "Tavolo falso".into();
     let msg = Messaggio::Istantanea {
         epoca: r.nodo(c).epoca(),
-        host: r.nodo(c).host().unwrap().clone(),
+        host: r.nodo(c).host_regia().unwrap().clone(),
         tavolo: Box::new(falso),
     };
     r.coda.push_back((h, c, msg.codifica()));
@@ -1153,16 +1161,25 @@ fn host_ricarica_la_pagina() {
 
 #[test]
 fn richieste_alla_sessione_giusta() {
-    let (mut r, a, b, _) = tavolo_tipico(Variante::Vanilla);
+    let (mut r, a, _, _) = tavolo_tipico(Variante::Vanilla);
     r.gioca_fino(20);
-    let _a2 = r.unisci("a");
-    let host = r.host_h();
+    let a2 = r.unisci("a");
+    assert!(r.nodo(a).sostituito() && !r.nodo(a2).sostituito());
+    let (host, prima) = (r.host_h(), r.inviati.len());
     let n = r.tavolo(host).n;
-    // b's requests reach the live host, never the superseded tab
+    // b.s and a2.s requests reach the live host, never the superseded tab
     r.gioca_fino(n + 10);
     assert!(r.tavolo(host).n >= n + 10);
-    assert!(!r.rifiuti.contains_key(&b), "{:?}", r.rifiuti);
-    assert!(r.inviati.iter().all(|(_, d, m)| *d != a
-        || !matches!(m, Messaggio::Richiesta { .. })
-        || r.nodo(a).e_host()));
+    assert!(r.rifiuti.is_empty(), "{:?}", r.rifiuti);
+    let al_vecchio = r.inviati[prima..]
+        .iter()
+        .filter(|(_, d, m)| *d == a && matches!(m, Messaggio::Richiesta { .. }))
+        .count();
+    assert_eq!(al_vecchio, 0, "requests sent to the superseded tab");
+    // the superseded tab refuses to act
+    r.richiedi(a, Richiesta::Prosegui);
+    assert_eq!(
+        r.rifiuti[&a],
+        ["Questa partita è aperta in un'altra scheda"]
+    );
 }

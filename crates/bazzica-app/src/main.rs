@@ -73,6 +73,15 @@ impl Vista {
 }
 
 impl Ctx {
+    /// Whether another tab of this identity took the table over.
+    pub fn sostituita(&self) -> bool {
+        let _ = self.versione.read();
+        self.conn
+            .read()
+            .as_ref()
+            .is_some_and(|c| c.sessione.borrow().nodo().sostituito())
+    }
+
     pub fn vista(&self) -> Option<Vista> {
         let _ = self.versione.read();
         let c = self.conn.read().clone()?;
@@ -134,7 +143,7 @@ impl Ctx {
                     cambiato = true;
                     effetti.extend(eventi_visibili(c, &voce, &eventi));
                 }
-                Uscita::Sincronizzata => cambiato = true,
+                Uscita::Sincronizzata | Uscita::Sostituita => cambiato = true,
                 Uscita::Rifiutata { motivo } => self.avvisa(motivo),
                 Uscita::Effimero { effetto, .. } => {
                     effetti.push(effimero_json(&effetto));
@@ -374,17 +383,42 @@ fn App() -> Element {
         }
     });
 
+    let sostituita = ctx.sostituita();
     let conn = ctx.conn.read().clone();
     let vista = ctx.vista();
     rsx! {
         document::Stylesheet { href: asset!("/assets/style.css") }
         match (conn, vista) {
+            (Some(_), _) if sostituita => rsx! { Sostituita {} },
             (None, _) => rsx! { home::Home {} },
             (Some(c), None) => rsx! { collegamento::Attesa { codice: c.codice.clone() } },
             (Some(_), Some(v)) => rsx! { stanza::Tavolo { vista: v } },
         }
         if let Some((testo, _)) = ctx.avviso.read().clone() {
             div { class: "avviso", onclick: move |_| { let mut a = ctx.avviso; a.set(None) }, "{testo}" }
+        }
+    }
+}
+
+/// This tab was superseded by another tab or page of the same player.
+#[component]
+fn Sostituita() -> Element {
+    let ctx = use_context::<Ctx>();
+    rsx! {
+        div { class: "schermo centrato",
+            h1 { class: "logo", "Bazzica" }
+            div { class: "pannello",
+                p { "Questa partita è aperta in un'altra scheda." }
+                button {
+                    onclick: move |_| {
+                        if let Some(c) = ctx.conn.peek().clone() {
+                            c.riprendi();
+                        }
+                    },
+                    "Gioca qui"
+                }
+                button { class: "secondario", onclick: move |_| ctx.esci(), "Esci" }
+            }
         }
     }
 }
