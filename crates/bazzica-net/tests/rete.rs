@@ -86,6 +86,29 @@ impl Rete {
         h
     }
 
+    /// Adds several nodes at once: all links open before any message is delivered.
+    fn entrano_insieme(&mut self, nodi: Vec<Nodo<H>>) -> Vec<H> {
+        let nuovi: Vec<H> = nodi
+            .into_iter()
+            .map(|n| {
+                let h = self.prossimo;
+                self.prossimo += 1;
+                self.nodi.insert(h, n);
+                h
+            })
+            .collect();
+        let tutti: Vec<H> = self.nodi.keys().copied().collect();
+        for &h in &nuovi {
+            for &a in &tutti {
+                if a != h {
+                    self.collega_senza_pompare(a, h);
+                }
+            }
+        }
+        self.pompa();
+        nuovi
+    }
+
     fn collega_senza_pompare(&mut self, a: H, b: H) {
         if self.collegamenti.insert(coppia(a, b)) {
             self.nodi.get_mut(&a).unwrap().connesso(self.ora, b);
@@ -1182,4 +1205,83 @@ fn richieste_alla_sessione_giusta() {
         r.rifiuti[&a],
         ["Questa partita è aperta in un'altra scheda"]
     );
+}
+
+fn quanti_host_dopo(r: &Rete, dal: usize) -> usize {
+    r.inviati[dal..]
+        .iter()
+        .filter_map(|(da, _, m)| matches!(m, Messaggio::Host { .. }).then_some(*da))
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+#[test]
+fn entrano_insieme_poi_host_esce() {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    // b and c scan the code together: they meet before either has the replica
+    let bc = r.entrano_insieme(vec![
+        Nodo::unisciti(io("b"), 2, config()),
+        Nodo::unisciti(io("c"), 3, config()),
+    ]);
+    let (b, c) = (bc[0], bc[1]);
+    r.assert_sincronizzati();
+    let prima = r.inviati.len();
+    r.esci(a);
+    assert_eq!(quanti_host_dopo(&r, prima), 1, "only b claims");
+    assert!(r.nodo(b).e_host() && !r.nodo(c).e_host());
+    r.assert_sincronizzati();
+}
+
+/// Four at the table, the host a, all seated with the default timers.
+fn quattro_umani() -> (Rete, [H; 4]) {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let b = r.unisci("b");
+    let c = r.unisci("c");
+    let d = r.unisci("d");
+    for (h, s) in [(a, 0), (b, 1), (c, 2), (d, 3)] {
+        r.richiedi(h, Richiesta::Siedi { posto: s });
+    }
+    r.richiedi(a, Richiesta::Avvia);
+    (r, [a, b, c, d])
+}
+
+#[test]
+fn rete_parziale_nessuno_split_brain() {
+    let (mut r, [a, b, c, d]) = quattro_umani();
+    r.gioca_fino(10);
+    r.scollega_coppia(b, c);
+    let n = r.tavolo(b).n;
+    r.esci(a);
+    // b and c cannot see each other: at most one of them may sequence
+    assert!(quanti_host(&r) <= 1);
+    for _ in 0..5 {
+        r.avanza(60_000);
+    }
+    let sequenziano: Vec<H> = [b, c, d]
+        .into_iter()
+        .filter(|&h| r.tavolo(h).n > n)
+        .collect();
+    assert!(sequenziano.len() <= 1, "split brain: {sequenziano:?}");
+}
+
+#[test]
+fn partizione_due_a_due() {
+    let (mut r, [a, b, c, d]) = quattro_umani();
+    r.gioca_fino(10);
+    for (x, y) in [(a, c), (a, d), (b, c), (b, d)] {
+        r.scollega_coppia(x, y);
+    }
+    assert!(r.nodo(a).e_host());
+    assert!(
+        r.nodo(c).host().is_none() && r.nodo(d).host().is_none(),
+        "the minority side does not elect"
+    );
+    let n = r.tavolo(c).n;
+    for _ in 0..5 {
+        r.avanza(60_000);
+    }
+    assert_eq!(r.tavolo(c).n, n);
+    assert_eq!(r.tavolo(d).n, n);
 }
