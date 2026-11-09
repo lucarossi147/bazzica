@@ -64,6 +64,11 @@ pub struct Vista {
     pub disconnessi: Vec<IdGiocatore>,
 }
 
+/// Shown when this device follows no host: the host left and this side of the network cannot
+/// elect one (no majority), or nobody else is here.
+pub const SENZA_REGIA: &str =
+    "Non riesco a raggiungere la regia: aspetto che si ricolleghi qualcuno";
+
 impl Vista {
     pub fn nome(&self, id: &str) -> String {
         self.tavolo

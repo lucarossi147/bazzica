@@ -1226,6 +1226,11 @@ fn entrano_insieme_poi_host_esce() {
     ]);
     let (b, c) = (bc[0], bc[1]);
     r.assert_sincronizzati();
+    assert!(
+        r.nodo(c).peer_con_replica().contains("b"),
+        "c knows b holds a replica"
+    );
+    assert!(r.nodo(b).peer_con_replica().contains("c"));
     let prima = r.inviati.len();
     r.esci(a);
     assert_eq!(quanti_host_dopo(&r, prima), 1, "only b claims");

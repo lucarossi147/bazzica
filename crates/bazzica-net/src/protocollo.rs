@@ -1,5 +1,7 @@
 //! Wire messages exchanged between peers (JSON over a reliable, ordered channel).
 
+use std::collections::BTreeSet;
+
 use bazzica_core::{Azione, Seat};
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +11,9 @@ use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, Voce};
 ///
 /// - 3: `Allineato`, the answer to a `Host` claim (sync barrier of a new host).
 /// - 4: [`Sessione`] in `Ciao`, the host's [`Regia`] in `Istantanea`, `Sostituito`.
-pub const VERSIONE_PROTOCOLLO: u32 = 4;
+/// - 5: `HoReplica` (fixes stale replica flags), `Presenti` (the host's view, for the
+///   majority rule of elections).
+pub const VERSIONE_PROTOCOLLO: u32 = 5;
 
 /// One run of the app (a page load) for an identity. When two runs of the same identity are
 /// connected (two tabs, a reload before the old link timed out), the newer one wins: later
@@ -107,6 +111,14 @@ pub enum Messaggio {
     Effimero(Effimero),
     /// "A newer session of your identity is here": the receiver stops acting.
     Sostituito,
+    /// "I hold a replica now" (sent once, when the first snapshot is adopted), so peers that
+    /// met us earlier count us as a possible host.
+    HoReplica,
+    /// Host -> everyone: who the host sees connected (itself included). Elections need a
+    /// strict majority of this set, so two sides of a split network never both elect.
+    Presenti {
+        ids: BTreeSet<IdGiocatore>,
+    },
 }
 
 impl Messaggio {
