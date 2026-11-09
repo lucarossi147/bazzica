@@ -1,0 +1,1128 @@
+use super::{
+    SignallerBuilder,
+    error::{ChannelError, SignalingError},
+};
+use crate::{
+    Error,
+    webrtc_socket::{
+        MessageLoopFuture, Packet, PeerEvent, PeerRequest, UseMessenger, UseSignallerBuilder,
+        message_loop, signaling_loop,
+    },
+};
+
+use futures::{
+    Future, FutureExt, Sink, Stream, StreamExt,
+    future::{Fuse, FusedFuture},
+    select,
+};
+use futures_channel::mpsc::{
+    SendError, TryRecvError, TrySendError, UnboundedReceiver, UnboundedSender,
+};
+use log::{debug, error, info, warn};
+use matchbox_protocol::PeerId;
+use std::{
+    collections::HashMap,
+    pin::Pin,
+    sync::{Arc, Mutex, PoisonError},
+    task::Poll,
+    time::Duration,
+};
+
+/// Configuration options for an ICE server connection.
+/// See also: <https://developer.mozilla.org/en-US/docs/Web/API/RTCIceServer#example>
+#[derive(Debug, Clone)]
+pub struct RtcIceServerConfig {
+    /// An ICE server instance can have several URLs
+    pub urls: Vec<String>,
+    /// A username for authentication with the ICE server
+    ///
+    /// See: <https://developer.mozilla.org/en-US/docs/Web/API/RTCIceServer/username>
+    pub username: Option<String>,
+    /// A password or token when authenticating with a turn server
+    ///
+    /// See: <https://developer.mozilla.org/en-US/docs/Web/API/RTCIceServer/credential>
+    pub credential: Option<String>,
+}
+
+/// Configuration options for a data channel
+/// See also: <https://developer.mozilla.org/en-US/docs/Web/API/RTCDataChannel>
+#[derive(Debug, Clone, Copy)]
+pub struct ChannelConfig {
+    /// Whether messages sent on the channel are guaranteed to arrive in order
+    /// See also: <https://developer.mozilla.org/en-US/docs/Web/API/RTCDataChannel/ordered>
+    pub ordered: bool,
+    /// Maximum number of retransmit attempts of a message before giving up
+    /// See also: <https://developer.mozilla.org/en-US/docs/Web/API/RTCDataChannel/maxRetransmits>
+    pub max_retransmits: Option<u16>,
+}
+
+impl ChannelConfig {
+    /// Messages sent via an unreliable channel may arrive in any order or not at all, but arrive as
+    /// quickly as possible.
+    pub fn unreliable() -> Self {
+        ChannelConfig {
+            ordered: false,
+            max_retransmits: Some(0),
+        }
+    }
+
+    /// Messages sent via a reliable channel are guaranteed to arrive (and guaranteed to arrive in
+    /// order the order they were sent) and will be retransmitted until they arrive.
+    pub fn reliable() -> Self {
+        ChannelConfig {
+            ordered: true,
+            max_retransmits: None,
+        }
+    }
+}
+
+impl Default for RtcIceServerConfig {
+    fn default() -> Self {
+        Self {
+            urls: vec![
+                "stun:stun.l.google.com:19302".to_string(),
+                "stun:stun1.l.google.com:19302".to_string(),
+            ],
+            username: Default::default(),
+            credential: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SocketConfig {
+    /// The url for the room to connect to
+    ///
+    /// This is a websocket url, starting with `ws://` or `wss://` followed by
+    /// the hostname and path to a matchbox server, followed by a room id and
+    /// optional query parameters.
+    ///
+    /// e.g.: `wss://matchbox.example.com/your_game`
+    ///
+    /// or: `wss://matchbox.example.com/your_game?next=2`
+    ///
+    /// The last form will pair player in the order they connect.
+    pub(crate) room_url: String,
+    /// Configuration for the (single) ICE server
+    pub(crate) ice_server: RtcIceServerConfig,
+    /// Configuration for one or multiple reliable or unreliable data channels
+    pub(crate) channels: Vec<ChannelConfig>,
+    /// The amount of attempts to initiate connection
+    pub(crate) attempts: Option<u16>,
+    /// Interval at which to send empty requests to the signaling server
+    pub(crate) keep_alive_interval: Option<Duration>,
+}
+
+/// Builder for [`WebRtcSocket`]s.
+///
+/// Begin with [`WebRtcSocketBuilder::new`] and add at least one channel with
+/// [`WebRtcSocketBuilder::add_channel`] before calling
+/// [`WebRtcSocketBuilder::build`] to produce the desired [`WebRtcSocket`].
+#[derive(Debug, Clone)]
+pub struct WebRtcSocketBuilder {
+    pub(crate) config: SocketConfig,
+    pub(crate) signaller_builder: Option<Arc<dyn SignallerBuilder>>,
+}
+
+impl WebRtcSocketBuilder {
+    /// Creates a new builder for a connection to a given room with the default ICE
+    /// server configuration, and three reconnection attempts.
+    ///
+    /// You must add at least one channel with [`WebRtcSocketBuilder::add_channel`]
+    /// before you can build the [`WebRtcSocket`]
+    pub fn new(room_url: impl Into<String>) -> Self {
+        Self {
+            config: SocketConfig {
+                room_url: room_url.into(),
+                ice_server: RtcIceServerConfig::default(),
+                channels: Vec::default(),
+                attempts: Some(3),
+                keep_alive_interval: Some(Duration::from_secs(10)),
+            },
+            signaller_builder: None,
+        }
+    }
+
+    /// Sets the socket ICE server configuration.
+    pub fn ice_server(mut self, ice_server: RtcIceServerConfig) -> Self {
+        self.config.ice_server = ice_server;
+        self
+    }
+
+    /// Sets the number of attempts to make at reconnecting to the signaling server,
+    /// if `None` the socket will attempt to connect indefinitely.
+    ///
+    /// The default is 3 reconnection attempts.
+    pub fn reconnect_attempts(mut self, attempts: Option<u16>) -> Self {
+        self.config.attempts = attempts;
+        self
+    }
+
+    /// Sets the interval at which to send empty requests to the signaling server.
+    ///
+    /// Some web services (like e.g. nginx as a reverse proxy) will close idle
+    /// web sockets. Setting this interval will periodically send empty requests
+    /// to let the signaling server know the client is still connected and
+    /// prevent disconnections.
+    ///
+    /// The defaults is 10 seconds.
+    pub fn signaling_keep_alive_interval(mut self, interval: Option<Duration>) -> Self {
+        self.config.keep_alive_interval = interval;
+        self
+    }
+
+    /// Adds a new channel to the [`WebRtcSocket`] configuration according to a [`ChannelConfig`].
+    pub fn add_channel(mut self, config: ChannelConfig) -> WebRtcSocketBuilder {
+        self.config.channels.push(config);
+        self
+    }
+
+    /// Adds a new unreliable channel to the [`WebRtcSocket`] configuration.
+    pub fn add_unreliable_channel(mut self) -> WebRtcSocketBuilder {
+        self.config.channels.push(ChannelConfig::unreliable());
+        self
+    }
+
+    /// Adds a new reliable channel to the [`WebRtcSocket`] configuration.
+    pub fn add_reliable_channel(mut self) -> WebRtcSocketBuilder {
+        self.config.channels.push(ChannelConfig::reliable());
+        self
+    }
+
+    /// Sets an alternative signalling implementation for this [`WebRtcSocket`].
+    pub fn signaller_builder(mut self, signaller_builder: Arc<dyn SignallerBuilder>) -> Self {
+        self.signaller_builder = Some(signaller_builder);
+        self
+    }
+
+    /// Creates a [`WebRtcSocket`] and the corresponding [`MessageLoopFuture`] according to the
+    /// configuration supplied.
+    ///
+    /// The returned [`MessageLoopFuture`] should be awaited in order for messages to be sent and
+    /// received.
+    pub fn build(self) -> (WebRtcSocket, MessageLoopFuture) {
+        assert!(
+            !self.config.channels.is_empty(),
+            "Must have added at least one channel"
+        );
+
+        let (peer_state_tx, peer_state_rx) = futures_channel::mpsc::unbounded();
+        let (candidate_pair_tx, candidate_pair_rx) = futures_channel::mpsc::unbounded();
+
+        let mut peer_messages_out_rx = Vec::with_capacity(self.config.channels.len());
+        let mut messages_from_peers_tx = Vec::with_capacity(self.config.channels.len());
+        let mut channels = Vec::with_capacity(self.config.channels.len());
+        for channel_config in self.config.channels.iter() {
+            let (messages_from_peers_tx_curr, messages_from_peers_rx_curr) =
+                futures_channel::mpsc::unbounded();
+            let (peer_messages_out_tx_curr, peer_messages_out_rx_curr) =
+                futures_channel::mpsc::unbounded();
+            peer_messages_out_rx.push(peer_messages_out_rx_curr);
+            messages_from_peers_tx.push(messages_from_peers_tx_curr);
+            channels.push(Some(WebRtcChannel {
+                config: *channel_config,
+                rx: messages_from_peers_rx_curr,
+                tx: peer_messages_out_tx_curr,
+            }));
+        }
+
+        let (id_tx, id_rx) = futures_channel::oneshot::channel();
+        let signaller_builder = self
+            .signaller_builder
+            .unwrap_or_else(|| Arc::new(UseSignallerBuilder::default()));
+
+        let socket_fut = run_socket(
+            signaller_builder,
+            id_tx,
+            self.config,
+            peer_messages_out_rx,
+            peer_state_tx,
+            candidate_pair_tx,
+            messages_from_peers_tx,
+        )
+        // Transform the source into a user-error.
+        .map(|f| {
+            f.map_err(|e| match e {
+                SignalingError::UndeliverableSignal(e) => Error::Disconnected(e.into()),
+                SignalingError::NegotiationFailed(e) => Error::ConnectionFailed(*e),
+                SignalingError::WebSocket(e) => Error::Disconnected(e.into()),
+                SignalingError::UserImplementationError(_) => Error::ConnectionFailed(e),
+                SignalingError::UnknownFormat | SignalingError::StreamExhausted => {
+                    unimplemented!("these errors should never be propagated here")
+                }
+            })
+        });
+
+        (
+            WebRtcSocket {
+                id: Default::default(),
+                id_rx,
+                peer_state_rx,
+                peers: Default::default(),
+                candidate_pair_rx,
+                candidate_pairs: Default::default(),
+                channels,
+            },
+            Box::pin(socket_fut),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The state of a connection to a peer
+pub enum PeerState {
+    /// The peer is connected
+    ///
+    /// This means all of the following should be true:
+    ///
+    /// - The requested data channels have been established and are healthy
+    /// - The peer hasn't left the signaling server
+    Connected,
+    /// We no longer have a connection to this peer:
+    ///
+    /// This means either:
+    ///
+    /// - Some of the the data channels got disconnected/closed
+    /// - The peer left the signaling server
+    Disconnected,
+}
+
+/// The kind of ICE candidate one end of a peer connection uses, see [`CandidatePair`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CandidateType {
+    /// The address of a network interface
+    Host,
+    /// The public address of the NAT in front of that end, learned by asking a STUN server
+    ServerReflexive,
+    /// An address learned from a packet the peer sent, before signaling delivered its candidate.
+    /// On the remote end, replaced by the type the peer signaled for that address once it
+    /// arrives, so mostly seen for candidates signaled under an mDNS name.
+    PeerReflexive,
+    /// An address on a TURN server, which relays the traffic
+    Relay,
+}
+
+/// The candidates a peer connection currently runs over, see [`WebRtcSocket::candidate_pair`].
+///
+/// `remote` tells how the peer is reached: directly, through its NAT's public address, or through
+/// a relay. Use `remote` or [`is_relayed`](Self::is_relayed) for decisions. `local` is diagnostic
+/// only, its type for the same path varies by platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct CandidatePair {
+    /// Our end
+    pub local: CandidateType,
+    /// The peer's end
+    pub remote: CandidateType,
+}
+
+impl CandidatePair {
+    /// Whether either end is a TURN relay, so the traffic goes through a TURN server
+    pub fn is_relayed(&self) -> bool {
+        self.local == CandidateType::Relay || self.remote == CandidateType::Relay
+    }
+}
+
+/// The candidates a peer signaled, by address, to put a type on the peer reflexive ones ICE
+/// learns from its packets before the candidate arrives
+pub(crate) type SignaledCandidates = Arc<Mutex<HashMap<(String, u16), CandidateType>>>;
+
+/// Records a signaled candidate from its SDP form, `candidate:... <ip> <port> typ <type> ...`
+pub(crate) fn record_signaled_candidate(candidates: &SignaledCandidates, sdp: &str) {
+    let fields: Vec<&str> = sdp.split_whitespace().collect();
+    let (Some(ip), Some(port), Some(typ)) = (
+        fields.get(4),
+        fields.get(5).and_then(|port| port.parse().ok()),
+        fields.get(7),
+    ) else {
+        return;
+    };
+    let typ = match *typ {
+        "host" => CandidateType::Host,
+        "srflx" => CandidateType::ServerReflexive,
+        "prflx" => CandidateType::PeerReflexive,
+        "relay" => CandidateType::Relay,
+        _ => return,
+    };
+    candidates
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert((ip.to_string(), port), typ);
+}
+
+/// The type the peer signaled for the candidate at this address, if any
+pub(crate) fn signaled_type(
+    candidates: &SignaledCandidates,
+    ip: &str,
+    port: u16,
+) -> Option<CandidateType> {
+    candidates
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&(ip.to_string(), port))
+        .copied()
+}
+/// Used to send and receive packets on a given WebRTC channel. Must be created as part of a
+/// [`WebRtcSocket`].
+/// This corresponds to a collection of lower level channels, one for each [`PeerState::Connected`]
+/// peer (identified by their PeerId).
+#[derive(Debug)]
+pub struct WebRtcChannel {
+    config: ChannelConfig,
+    tx: UnboundedSender<(PeerId, Packet)>,
+    rx: UnboundedReceiver<(PeerId, Packet)>,
+}
+
+impl WebRtcChannel {
+    /// Split the channel into a reader and writer.
+    /// Useful for concurrently sending and receiving messages using async code.
+    #[allow(clippy::type_complexity)]
+    pub fn split(
+        self,
+    ) -> (
+        UnboundedSender<(PeerId, Packet)>,
+        UnboundedReceiver<(PeerId, Packet)>,
+    ) {
+        (self.tx, self.rx)
+    }
+
+    /// Clone a sender for this channel.
+    /// Useful for sending messages to the same channel from multiple threads/async tasks.
+    pub fn sender_clone(&self) -> UnboundedSender<(PeerId, Packet)> {
+        self.tx.clone()
+    }
+
+    /// Returns the [`ChannelConfig`] used to create this channel.
+    pub fn config(&self) -> &ChannelConfig {
+        &self.config
+    }
+
+    /// Returns whether it's still possible to send messages.
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
+    /// Close this channel.
+    ///
+    /// This prevents sending and receiving any messages in the future, but does not drain messages
+    /// that are buffered.
+    pub fn close(&mut self) {
+        self.tx.close_channel();
+        self.rx.close();
+    }
+
+    /// Call this where you want to handle new received messages. Returns immediately.
+    ///
+    /// Messages are removed from the socket when called.
+    pub fn receive(&mut self) -> Vec<(PeerId, Packet)> {
+        let mut messages = vec![];
+        while let Ok(x) = self.rx.try_recv() {
+            messages.push(x);
+        }
+        messages
+    }
+
+    /// Try to send a packet to the given peer. An error is propagated if the socket future
+    /// is dropped. `Ok` is not a guarantee of delivery.
+    pub fn try_send(&mut self, packet: Packet, peer: PeerId) -> Result<(), SendError> {
+        self.tx
+            .unbounded_send((peer, packet))
+            .map_err(TrySendError::into_send_error)
+    }
+
+    /// Send a packet to the given peer. There is no guarantee of delivery.
+    ///
+    /// # Panics
+    /// Panics if the socket future is dropped.
+    pub fn send(&mut self, packet: Packet, peer: PeerId) {
+        self.try_send(packet, peer).expect("Send failed");
+    }
+}
+
+impl Stream for WebRtcChannel {
+    type Item = (PeerId, Packet);
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let mut rx = Pin::new(&mut self.get_mut().rx);
+        rx.as_mut().poll_next(cx)
+    }
+}
+
+impl Sink<(PeerId, Packet)> for WebRtcChannel {
+    type Error = SendError;
+
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        let mut tx = Pin::new(&mut self.get_mut().tx);
+        tx.as_mut().poll_ready(cx)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: (PeerId, Packet)) -> Result<(), Self::Error> {
+        let mut tx = Pin::new(&mut self.get_mut().tx);
+        tx.as_mut().start_send(item)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        let mut tx = Pin::new(&mut self.get_mut().tx);
+        tx.as_mut().poll_flush(cx)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        let mut tx = Pin::new(&mut self.get_mut().tx);
+        tx.as_mut().poll_close(cx)
+    }
+}
+
+/// Contains a set of [`WebRtcChannel`]s and connection metadata.
+#[derive(Debug)]
+pub struct WebRtcSocket {
+    id: once_cell::race::OnceBox<PeerId>,
+    id_rx: futures_channel::oneshot::Receiver<PeerId>,
+    peer_state_rx: futures_channel::mpsc::UnboundedReceiver<(PeerId, PeerState)>,
+    peers: HashMap<PeerId, PeerState>,
+    candidate_pair_rx: futures_channel::mpsc::UnboundedReceiver<(PeerId, CandidatePair)>,
+    candidate_pairs: HashMap<PeerId, CandidatePair>,
+    /// The channels, in the order specified by the builder.
+    /// These are [`Some`] even before any connection is made: the only transition to [`None`] when
+    /// [`ChannelError::Taken`].
+    channels: Vec<Option<WebRtcChannel>>,
+}
+
+impl WebRtcSocket {
+    /// Creates a new builder for a connection to a given room with a given number of
+    /// re-connection attempts.
+    ///
+    /// You must add at least one channel with [`WebRtcSocketBuilder::add_channel`]
+    /// before you can build the [`WebRtcSocket`]
+    pub fn builder(room_url: impl Into<String>) -> WebRtcSocketBuilder {
+        WebRtcSocketBuilder::new(room_url)
+    }
+
+    /// Creates a [`WebRtcSocket`] and the corresponding [`MessageLoopFuture`] for a
+    /// socket with a single unreliable channel.
+    ///
+    /// The returned [`MessageLoopFuture`] should be awaited in order for messages to
+    /// be sent and received.
+    ///
+    /// Please use the [`WebRtcSocketBuilder`] to create non-trivial sockets.
+    pub fn new_unreliable(room_url: impl Into<String>) -> (WebRtcSocket, MessageLoopFuture) {
+        WebRtcSocketBuilder::new(room_url)
+            .add_channel(ChannelConfig::unreliable())
+            .build()
+    }
+
+    /// Creates a [`WebRtcSocket`] and the corresponding [`MessageLoopFuture`] for a
+    /// socket with a single reliable channel.
+    ///
+    /// The returned [`MessageLoopFuture`] should be awaited in order for messages to
+    /// be sent and received.
+    ///
+    /// Please use the [`WebRtcSocketBuilder`] to create non-trivial sockets.
+    pub fn new_reliable(room_url: impl Into<String>) -> (WebRtcSocket, MessageLoopFuture) {
+        WebRtcSocketBuilder::new(room_url)
+            .add_channel(ChannelConfig::reliable())
+            .build()
+    }
+}
+
+impl Stream for WebRtcSocket {
+    type Item = (PeerId, PeerState);
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let mut peer_state_rx = Pin::new(&mut self.get_mut().peer_state_rx);
+        peer_state_rx.as_mut().poll_next(cx)
+    }
+}
+
+impl WebRtcSocket {
+    // Todo: Disconnect from the peer, severing all communication channels.
+    // pub fn disconnect(&mut self, peer: PeerId) {}
+
+    /// Close this socket, disconnecting all channels.
+    pub fn close(&mut self) {
+        self.channels
+            .iter_mut()
+            .filter_map(Option::as_mut)
+            .for_each(|c| c.close());
+    }
+
+    /// Handle peers connecting or disconnecting
+    ///
+    /// Constructed using [`WebRtcSocketBuilder`].
+    ///
+    /// Update the set of peers used by [`WebRtcSocket::connected_peers`] and
+    /// [`WebRtcSocket::disconnected_peers`].
+    ///
+    /// Returns the peers that connected or disconnected since the last time
+    /// this method was called.
+    ///
+    /// See also: [`PeerState`]
+    ///
+    /// # Panics
+    ///
+    /// Will panic if the socket future has been dropped.
+    ///
+    /// [`WebRtcSocket::try_update_peers`] is the equivalent method that will instead return a
+    /// `Result`.
+    pub fn update_peers(&mut self) -> Vec<(PeerId, PeerState)> {
+        self.try_update_peers().unwrap()
+    }
+
+    /// Similar to [`WebRtcSocket::update_peers`]. Will instead return a Result::Err if the
+    /// socket is closed, once every change received before the closure has been returned.
+    pub fn try_update_peers(&mut self) -> Result<Vec<(PeerId, PeerState)>, ChannelError> {
+        let mut changes = Vec::new();
+        loop {
+            match self.peer_state_rx.try_recv() {
+                Ok((id, state)) => {
+                    let old = self.peers.insert(id, state);
+                    if old != Some(state) {
+                        changes.push((id, state));
+                    }
+                    if state == PeerState::Disconnected {
+                        self.candidate_pairs.remove(&id);
+                    }
+                }
+                // Report the changes received before the closure first (the last
+                // peer's disconnect often arrives together with it); the next call
+                // reports the closure.
+                Err(TryRecvError::Closed) if changes.is_empty() => {
+                    return Err(ChannelError::Closed);
+                }
+                Err(TryRecvError::Closed) | Err(TryRecvError::Empty) => break,
+            }
+        }
+
+        while let Ok((id, pair)) = self.candidate_pair_rx.try_recv() {
+            if self.peers.get(&id) == Some(&PeerState::Connected) {
+                self.candidate_pairs.insert(id, pair);
+            }
+        }
+
+        Ok(changes)
+    }
+
+    /// Whether a connected peer's traffic goes through a TURN relay, ours or the peer's.
+    ///
+    /// `None` while unknown: for about a second after the peer connected, for the whole
+    /// connection if the platform doesn't expose the pair, and for peers that aren't connected.
+    /// Early values can still change as signaling completes. Refreshed by
+    /// [`WebRtcSocket::update_peers`].
+    pub fn is_relayed(&self, peer: PeerId) -> Option<bool> {
+        self.candidate_pair(peer).map(|pair| pair.is_relayed())
+    }
+
+    /// The ICE candidate types of the pair a connected peer is reached through, for logs and
+    /// diagnostics. For the plain question see [`WebRtcSocket::is_relayed`].
+    ///
+    /// `None` while unknown, see [`WebRtcSocket::is_relayed`]. The pair is polled about once a
+    /// second and refreshed by [`WebRtcSocket::update_peers`].
+    pub fn candidate_pair(&self, peer: PeerId) -> Option<CandidatePair> {
+        self.candidate_pairs.get(&peer).copied()
+    }
+
+    /// Returns an iterator of the ids of the connected peers.
+    ///
+    /// Note: You have to call [`WebRtcSocket::update_peers`] for this list to be accurate.
+    ///
+    /// See also: [`WebRtcSocket::disconnected_peers`]
+    pub fn connected_peers(&'_ self) -> impl std::iter::Iterator<Item = PeerId> + '_ {
+        self.peers.iter().filter_map(|(id, state)| {
+            if state == &PeerState::Connected {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns an iterator of the ids of peers that are no longer connected.
+    ///
+    /// Note: You have to call [`WebRtcSocket::update_peers`] for this list to be
+    /// accurate.
+    ///
+    /// See also: [`WebRtcSocket::connected_peers`]
+    pub fn disconnected_peers(&self) -> impl std::iter::Iterator<Item = &PeerId> {
+        self.peers.iter().filter_map(|(id, state)| {
+            if state == &PeerState::Disconnected {
+                Some(id)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns the id of this peer, this may be `None` if an id has not yet
+    /// been assigned by the server.
+    pub fn id(&mut self) -> Option<PeerId> {
+        if let Some(id) = self.id.get() {
+            Some(*id)
+        } else if let Ok(Some(id)) = self.id_rx.try_recv() {
+            let id = self.id.get_or_init(|| id.into());
+            Some(*id)
+        } else {
+            None
+        }
+    }
+
+    /// Gets an immutable reference to the [`WebRtcChannel`] of a given id.
+    ///
+    /// ```
+    /// use matchbox_socket::*;
+    ///
+    /// let (mut socket, message_loop) = WebRtcSocketBuilder::new("wss://example.invalid/")
+    ///     .add_channel(ChannelConfig::reliable())
+    ///     .add_channel(ChannelConfig::unreliable())
+    ///     .build();
+    /// let is_closed = socket.channel(0).is_closed();
+    /// ```
+    ///
+    /// See also: [`WebRtcSocket::channel_mut`], [`WebRtcSocket::get_channel`],
+    /// [`WebRtcSocket::take_channel`]
+    ///
+    /// # Panics
+    ///
+    /// will panic if the channel cannot be found.
+    pub fn channel(&self, channel: usize) -> &WebRtcChannel {
+        self.get_channel(channel).unwrap()
+    }
+
+    /// Gets a mutable reference to the [`WebRtcChannel`] at the specified index.
+    /// The channels are indexed based on the order they were added to the builder.
+    ///
+    /// ```
+    /// use matchbox_socket::*;
+    ///
+    /// let (mut socket, message_loop) = WebRtcSocketBuilder::new("wss://example.invalid/")
+    ///     .add_channel(ChannelConfig::reliable())
+    ///     .add_channel(ChannelConfig::unreliable())
+    ///     .build();
+    /// let reliable_channel_messages = socket.channel_mut(0).receive();
+    /// ```
+    ///
+    /// See also: [`WebRtcSocket::channel`], [`WebRtcSocket::get_channel_mut`],
+    /// [`WebRtcSocket::take_channel`]
+    ///
+    /// # Panics
+    ///
+    /// will panic if the channel cannot be found.
+    pub fn channel_mut(&mut self, channel_index: usize) -> &mut WebRtcChannel {
+        self.get_channel_mut(channel_index).unwrap()
+    }
+
+    /// Gets an immutable reference to the [`WebRtcChannel`] at the specified index.
+    /// The channels are indexed based on the order they were added to the builder.
+    ///
+    /// Returns an error if the channel was not found.
+    ///
+    /// ```
+    /// use matchbox_socket::*;
+    ///
+    /// let (mut socket, message_loop) = WebRtcSocketBuilder::new("wss://example.invalid/")
+    ///     .add_channel(ChannelConfig::reliable())
+    ///     .add_channel(ChannelConfig::unreliable())
+    ///     .build();
+    /// let is_closed = socket.get_channel(0).unwrap().is_closed();
+    /// ```
+    ///
+    /// See also: [`WebRtcSocket::get_channel_mut`], [`WebRtcSocket::take_channel`]
+    pub fn get_channel(&self, channel_index: usize) -> Result<&WebRtcChannel, ChannelError> {
+        self.channels
+            .get(channel_index)
+            .ok_or(ChannelError::NotFound)?
+            .as_ref()
+            .ok_or(ChannelError::Taken)
+    }
+
+    /// Gets a mutable reference to the [`WebRtcChannel`] at the specified index.
+    /// The channels are indexed based on the order they were added to the builder.
+    ///
+    /// Returns an error if the channel was not found.
+    ///
+    /// ```
+    /// use matchbox_socket::*;
+    ///
+    /// let (mut socket, message_loop) = WebRtcSocketBuilder::new("wss://example.invalid/")
+    ///     .add_channel(ChannelConfig::reliable())
+    ///     .add_channel(ChannelConfig::unreliable())
+    ///     .build();
+    /// let reliable_channel_messages = socket.get_channel_mut(0).unwrap().receive();
+    /// ```
+    ///
+    /// See also: [`WebRtcSocket::channel`], [`WebRtcSocket::take_channel`]
+    pub fn get_channel_mut(
+        &mut self,
+        channel_index: usize,
+    ) -> Result<&mut WebRtcChannel, ChannelError> {
+        self.channels
+            .get_mut(channel_index)
+            .ok_or(ChannelError::NotFound)?
+            .as_mut()
+            .ok_or(ChannelError::Taken)
+    }
+
+    /// Takes the [`WebRtcChannel`] at the specified index.
+    /// The channels are indexed based on the order they were added to the builder.
+    ///
+    /// ```
+    /// use matchbox_socket::*;
+    ///
+    /// let (mut socket, message_loop) = WebRtcSocketBuilder::new("wss://example.invalid/")
+    ///     .add_channel(ChannelConfig::reliable())
+    ///     .add_channel(ChannelConfig::unreliable())
+    ///     .build();
+    /// let reliable_channel = socket.take_channel(0).unwrap();
+    /// let unreliable_channel = socket.take_channel(1).unwrap();
+    /// ```
+    ///
+    /// See also: [`WebRtcSocket::channel`]
+    pub fn take_channel(&mut self, channel_index: usize) -> Result<WebRtcChannel, ChannelError> {
+        self.channels
+            .get_mut(channel_index)
+            .ok_or(ChannelError::NotFound)?
+            .take()
+            .ok_or(ChannelError::Taken)
+    }
+
+    /// Returns whether any (non-taken) socket channel is closed.
+    pub fn any_channel_closed(&self) -> bool {
+        self.channels.iter().flatten().any(|c| c.is_closed())
+    }
+
+    /// Returns whether all (non-taken) socket channels are closed.
+    pub fn all_channels_closed(&self) -> bool {
+        self.channels.iter().flatten().all(|c| c.is_closed())
+    }
+}
+
+pub(crate) fn create_data_channels_ready_fut(
+    channel_configs: &[ChannelConfig],
+) -> (
+    Vec<futures_channel::mpsc::Sender<()>>,
+    Pin<Box<Fuse<impl Future<Output = ()> + use<>>>>,
+) {
+    let (senders, receivers) = (0..channel_configs.len())
+        .map(|_| futures_channel::mpsc::channel(1))
+        .unzip();
+
+    (senders, Box::pin(wait_for_ready(receivers).fuse()))
+}
+
+async fn wait_for_ready(channel_ready_rx: Vec<futures_channel::mpsc::Receiver<()>>) {
+    for mut receiver in channel_ready_rx {
+        if receiver.next().await.is_none() {
+            panic!("Sender closed before channel was ready");
+        }
+    }
+}
+
+/// All the channels needed for the messaging loop.
+pub struct MessageLoopChannels {
+    pub requests_sender: futures_channel::mpsc::UnboundedSender<PeerRequest>,
+    pub events_receiver: futures_channel::mpsc::UnboundedReceiver<PeerEvent>,
+    pub peer_messages_out_rx: Vec<futures_channel::mpsc::UnboundedReceiver<(PeerId, Packet)>>,
+    pub peer_state_tx: futures_channel::mpsc::UnboundedSender<(PeerId, PeerState)>,
+    pub candidate_pair_tx: futures_channel::mpsc::UnboundedSender<(PeerId, CandidatePair)>,
+    pub messages_from_peers_tx: Vec<futures_channel::mpsc::UnboundedSender<(PeerId, Packet)>>,
+}
+
+async fn run_socket(
+    builder: Arc<dyn SignallerBuilder>,
+    id_tx: futures_channel::oneshot::Sender<PeerId>,
+    config: SocketConfig,
+    peer_messages_out_rx: Vec<futures_channel::mpsc::UnboundedReceiver<(PeerId, Packet)>>,
+    peer_state_tx: futures_channel::mpsc::UnboundedSender<(PeerId, PeerState)>,
+    candidate_pair_tx: futures_channel::mpsc::UnboundedSender<(PeerId, CandidatePair)>,
+    messages_from_peers_tx: Vec<futures_channel::mpsc::UnboundedSender<(PeerId, Packet)>>,
+) -> Result<(), SignalingError> {
+    debug!("Starting WebRtcSocket");
+
+    // Connect to the signaling server before anything else: a failure here
+    // means no room was ever joined and no data channel exists, so the error
+    // must still surface to the caller (as `Error::ConnectionFailed` /
+    // `Error::Disconnected` on the message loop future).
+    let signaller = builder
+        .new_signaller(config.attempts, config.room_url)
+        .await?;
+
+    let (requests_sender, requests_receiver) = futures_channel::mpsc::unbounded::<PeerRequest>();
+    let (events_sender, events_receiver) = futures_channel::mpsc::unbounded::<PeerEvent>();
+
+    let signaling_loop_fut = signaling_loop(signaller, requests_receiver, events_sender);
+
+    let channels = MessageLoopChannels {
+        requests_sender,
+        events_receiver,
+        peer_messages_out_rx,
+        peer_state_tx,
+        candidate_pair_tx,
+        messages_from_peers_tx,
+    };
+    let message_loop_fut = message_loop::<UseMessenger>(
+        id_tx,
+        &config.ice_server,
+        &config.channels,
+        channels,
+        config.keep_alive_interval,
+    );
+
+    let mut message_loop_done = Box::pin(message_loop_fut.fuse());
+    let mut signaling_loop_done = Box::pin(signaling_loop_fut.fuse());
+    // Why the signaling loop ended, kept for when the message loop ends
+    // because of it.
+    let mut signaling_error = None;
+    loop {
+        select! {
+            msgloop = message_loop_done => {
+                match msgloop {
+                    Ok(()) => {
+                        debug!("Message loop completed");
+                        break Ok(())
+                    },
+                    Err(SignalingError::StreamExhausted) => {
+                        // The message loop ended because signaling is gone and
+                        // no peer is left: surface why signaling ended.
+                        let sigloop = if signaling_loop_done.is_terminated() {
+                            signaling_error.take().map_or(Ok(()), Err)
+                        } else {
+                            (&mut signaling_loop_done).await
+                        };
+                        match sigloop {
+                            Ok(()) | Err(SignalingError::StreamExhausted) => {
+                                debug!("Message loop completed");
+                                break Ok(())
+                            },
+                            Err(e) => {
+                                error!("The signaling loop finished with an error and no peer is connected: {e:?}");
+                                break Err(e);
+                            },
+                        }
+                    },
+                    Err(e) => {
+                        error!("The message loop finished with an error: {e:?}");
+                        break Err(e);
+                    },
+                }
+            }
+
+            sigloop = signaling_loop_done => {
+                // A signaling failure after the initial connection is not
+                // fatal while peers are connected: established peer
+                // connections live entirely on WebRTC data channels and do
+                // not involve the signaling server anymore. Keep the message
+                // loop (and with it every peer connection) running; only new
+                // handshakes are impossible until the application rebuilds
+                // the socket. (Reconnecting the websocket would not restore
+                // them either: rooms live in the server's memory.) This arm
+                // selects on a fused future, so once the signaling loop has
+                // ended, the arm stays disabled; the message loop observes
+                // the same event through its events channel closing, and ends
+                // the socket itself once no peer is left, with this error.
+                match sigloop {
+                    Ok(()) => info!("Signaling loop completed"),
+                    Err(e) => {
+                        warn!("Signaling loop finished with an error: {e:?}");
+                        signaling_error = Some(e);
+                    }
+                }
+            }
+
+            complete => break Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{Packet, PeerEvent, PeerRequest, SignalingError, SocketConfig, run_socket};
+    use crate::{
+        ChannelConfig, ChannelError, Error, WebRtcSocket, WebRtcSocketBuilder,
+        webrtc_socket::{Signaller, SignallerBuilder},
+    };
+    use futures_channel::mpsc;
+    use matchbox_protocol::PeerId;
+    use std::sync::Arc;
+
+    /// A signaller whose websocket connection dies immediately, simulating a
+    /// signaling server that goes away right after a successful connect.
+    #[derive(Debug)]
+    struct DyingSignaller;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Signaller for DyingSignaller {
+        async fn send(&mut self, _request: PeerRequest) -> Result<(), SignalingError> {
+            Ok(())
+        }
+
+        async fn next_message(&mut self) -> Result<PeerEvent, SignalingError> {
+            Err(SignalingError::UserImplementationError(
+                "websocket died".into(),
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct DyingSignallerBuilder;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl SignallerBuilder for DyingSignallerBuilder {
+        async fn new_signaller(
+            &self,
+            _attempts: Option<u16>,
+            _room_url: String,
+        ) -> Result<Box<dyn Signaller>, SignalingError> {
+            Ok(Box::new(DyingSignaller))
+        }
+    }
+
+    /// After a successful initial connect, a signaling loop failure is not
+    /// fatal while peers are connected (their connections live on WebRTC data
+    /// channels). With no peer connected, though, nothing can ever join
+    /// again, so the socket must end and surface the signaling error rather
+    /// than wait forever.
+    #[futures_test::test]
+    async fn signaling_failure_without_peers_ends_the_socket() {
+        let (id_tx, _id_rx) = futures_channel::oneshot::channel();
+        let (_peer_messages_out_tx, peer_messages_out_rx) = mpsc::unbounded::<(PeerId, Packet)>();
+        let (peer_state_tx, _peer_state_rx) = mpsc::unbounded();
+        let (candidate_pair_tx, _candidate_pair_rx) = mpsc::unbounded();
+        let (messages_from_peers_tx, _messages_from_peers_rx) = mpsc::unbounded();
+
+        let config = SocketConfig {
+            room_url: "wss://irrelevant.invalid".into(),
+            ice_server: Default::default(),
+            channels: vec![ChannelConfig::reliable()],
+            attempts: Some(1),
+            keep_alive_interval: None,
+        };
+
+        let result = run_socket(
+            Arc::new(DyingSignallerBuilder),
+            id_tx,
+            config,
+            vec![peer_messages_out_rx],
+            peer_state_tx,
+            candidate_pair_tx,
+            vec![messages_from_peers_tx],
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SignalingError::UserImplementationError(_))),
+            "expected the signaling error, got {result:?}"
+        );
+    }
+
+    #[futures_test::test]
+    async fn unreachable_server() {
+        // .invalid is a reserved tld for testing and documentation
+        let (_socket, fut) = WebRtcSocketBuilder::new("wss://example.invalid")
+            .add_channel(ChannelConfig::unreliable())
+            .build();
+
+        let result = fut.await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::ConnectionFailed { .. }
+        ));
+    }
+
+    #[futures_test::test]
+    async fn test_signaling_attempts() {
+        let (_socket, loop_fut) = WebRtcSocketBuilder::new("wss://example.invalid/")
+            .reconnect_attempts(Some(3))
+            .add_channel(ChannelConfig::reliable())
+            .build();
+
+        let result = loop_fut.await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::ConnectionFailed { .. },
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "Must have added at least one channel")]
+    fn no_channels() {
+        let (_socket, _fut) = WebRtcSocketBuilder::new("wss://example.invalid").build();
+    }
+
+    #[test]
+    fn builder() {
+        let mut builder = WebRtcSocket::builder("wss://example.invalid");
+        builder = builder.add_reliable_channel();
+        builder = builder.add_unreliable_channel();
+        let (socket, _fut) = builder.build();
+        assert_eq!(socket.channels.len(), 2);
+        // Channels are populated immediately, even before connecting.
+        let config_0 = &socket.channels[0].as_ref().unwrap().config;
+        let config_1 = &socket.channels[1].as_ref().unwrap().config;
+        assert!(config_0.ordered);
+        assert_eq!(config_0.max_retransmits, None);
+        assert!(!config_1.ordered);
+        assert_eq!(config_1.max_retransmits, Some(0));
+    }
+
+    #[test]
+    fn take_channel() {
+        let mut builder = WebRtcSocket::builder("wss://example.invalid");
+        builder = builder.add_reliable_channel();
+        let (mut socket, _fut) = builder.build();
+        assert!(socket.channels[0].is_some());
+
+        assert!(!socket.any_channel_closed());
+        assert!(!socket.all_channels_closed());
+
+        let mut taken = socket.take_channel(0).unwrap();
+
+        assert!(!socket.any_channel_closed());
+        assert!(socket.all_channels_closed());
+
+        assert!(socket.channels[0].is_none());
+        assert!(matches!(
+            socket.take_channel(0).unwrap_err(),
+            ChannelError::Taken,
+        ));
+        assert!(!taken.is_closed());
+        taken.close();
+        assert!(taken.is_closed());
+    }
+
+    #[test]
+    fn closed_channels() {
+        let mut builder = WebRtcSocket::builder("wss://example.invalid");
+        builder = builder.add_reliable_channel();
+        builder = builder.add_reliable_channel();
+        let (mut socket, _fut) = builder.build();
+
+        assert!(!socket.any_channel_closed());
+        assert!(!socket.all_channels_closed());
+
+        socket.get_channel_mut(0).unwrap().close();
+
+        assert!(socket.any_channel_closed());
+        assert!(!socket.all_channels_closed());
+
+        socket.get_channel_mut(1).unwrap().close();
+
+        assert!(socket.any_channel_closed());
+        assert!(socket.all_channels_closed());
+    }
+}
