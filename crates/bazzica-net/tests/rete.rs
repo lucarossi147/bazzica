@@ -1012,3 +1012,79 @@ fn chiedi_da_a_chi_non_e_host() {
     );
     fino_a_sincronizzati(&mut r, 50);
 }
+
+/// A hosts and watches with B and C; four bots play, so a bot move is always due.
+fn tavolo_tutti_bot() -> (Rete, H, H, H) {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let b = r.unisci("b");
+    let c = r.unisci("c");
+    for s in 0..4 {
+        r.richiedi(
+            a,
+            Richiesta::Bot {
+                posto: s,
+                aggiungi: true,
+            },
+        );
+    }
+    r.richiedi(a, Richiesta::Avvia);
+    (r, a, b, c)
+}
+
+/// `h` leaves; the others notice, but nothing is delivered yet.
+fn esci_senza_pompare(r: &mut Rete, h: H) {
+    r.nodi.remove(&h);
+    let ora = r.ora;
+    for v in r.stacca(h) {
+        r.nodi.get_mut(&v).unwrap().disconnesso(ora, &h);
+    }
+}
+
+#[test]
+fn voce_duplicata_diversa_forza_resync() {
+    let (mut r, a, _, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    devia(&mut r, c);
+    // the host repeats its last entry: c holds a different state at that position
+    let t = r.tavolo(a).clone();
+    let msg = Messaggio::Voce {
+        epoca: r.nodo(a).epoca(),
+        n: t.n,
+        voce: r.voci.last().unwrap().clone(),
+        impronta: t.impronta(),
+    };
+    r.coda.push_back((a, c, msg.codifica()));
+    r.pompa();
+    r.assert_sincronizzati();
+    assert_eq!(r.tavolo(c).n, t.n);
+}
+
+#[test]
+fn nuovo_host_non_agisce_prima_di_allinearsi() {
+    let (mut r, a, b, c) = tavolo_tutti_bot();
+    r.gioca_fino(30);
+    // b misses a's next entry, c applies it
+    r.perdi(a, b, |m| matches!(m, Messaggio::Voce { .. }));
+    r.avanza(10_000);
+    let (n_c, impronta_c) = (r.tavolo(c).n, r.tavolo(c).impronta());
+    assert_eq!(r.tavolo(b).n + 1, n_c);
+    // a leaves; b claims and ticks past the bot delay before hearing from anyone
+    esci_senza_pompare(&mut r, a);
+    r.tick_solo(b, 10_000);
+    assert_eq!(
+        r.tavolo(b).n + 1,
+        n_c,
+        "the new host sequenced before aligning"
+    );
+    r.pompa();
+    r.assert_sincronizzati();
+    assert!(r.nodo(b).e_host());
+    assert_eq!(
+        (r.tavolo(b).n, r.tavolo(b).impronta()),
+        (n_c, impronta_c),
+        "c's entry was kept"
+    );
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
