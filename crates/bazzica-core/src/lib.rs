@@ -8,6 +8,7 @@ pub mod bazzica;
 pub mod bots;
 pub mod cards;
 pub mod game;
+pub mod guida;
 pub mod prng;
 pub mod rules;
 pub mod scoring;
