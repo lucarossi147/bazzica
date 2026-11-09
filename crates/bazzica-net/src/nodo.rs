@@ -235,6 +235,12 @@ impl<P: Clone + Ord> Nodo<P> {
         }
     }
 
+    fn controlla(&self) {
+        if let Err(e) = self.verifica_invarianti() {
+            debug_assert!(false, "{e}");
+        }
+    }
+
     pub fn uscite(&mut self) -> Vec<Uscita<P>> {
         std::mem::take(&mut self.uscite)
     }
@@ -294,6 +300,7 @@ impl<P: Clone + Ord> Nodo<P> {
                 break;
             }
         }
+        self.controlla();
     }
 
     /// A request of the local user. Returns the request id (refusals arrive as [`Uscita::Rifiutata`]).
@@ -318,6 +325,7 @@ impl<P: Clone + Ord> Nodo<P> {
                 motivo: "Nessun host raggiungibile".into(),
             });
         }
+        self.controlla();
         self.rid
     }
 
@@ -335,6 +343,11 @@ impl<P: Clone + Ord> Nodo<P> {
 
     pub fn ricevi(&mut self, ora: u64, p: P, msg: Messaggio) {
         self.ora = ora;
+        self.ricevi_messaggio(p, msg);
+        self.controlla();
+    }
+
+    fn ricevi_messaggio(&mut self, p: P, msg: Messaggio) {
         if !self.peers.contains_key(&p) {
             return;
         }
@@ -443,8 +456,10 @@ impl<P: Clone + Ord> Nodo<P> {
             let da_n = t.n + 1;
             return self.chiedi(p, da_n);
         }
-        match t.applica(&voce) {
-            Ok(eventi) if t.impronta() == impronta => {
+        // commit only a state whose hash matches the host's (I4)
+        match t.applicata(&voce) {
+            Ok((nuovo, eventi)) if nuovo.impronta() == impronta => {
+                *t = nuovo;
                 self.log.push((voce.clone(), impronta));
                 self.uscite.push(Uscita::Applicata { voce, eventi });
             }
@@ -651,6 +666,7 @@ impl<P: Clone + Ord> Nodo<P> {
         self.tavolo = Some(tavolo);
         self.attesa_istantanea = false;
         self.uscite.push(Uscita::Sincronizzata);
+        self.controlla();
     }
 
     fn manda_istantanea(&mut self, a: Destinatario<P>) {
