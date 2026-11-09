@@ -16,7 +16,8 @@ use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, Voce};
 /// - 6: `Ricevuta`, the host's acknowledgement of a request.
 /// - 7: end-of-hand timer (`TipoTimer::FineMano`, `Impostazioni::timer_fine_mano`), seat
 ///   replacement (`Voce::Sostituisci`, `Voce::Riprendi`, `Tavolo::sostituiti`).
-pub const VERSIONE_PROTOCOLLO: u32 = 7;
+/// - 8: room key derived with scrypt (codes of older builds lead to another room).
+pub const VERSIONE_PROTOCOLLO: u32 = 8;
 
 /// One run of the app (a page load) for an identity. When two runs of the same identity are
 /// connected (two tabs, a reload before the old link timed out), the newer one wins: later

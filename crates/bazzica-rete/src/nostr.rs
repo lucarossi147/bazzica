@@ -3,6 +3,10 @@
 //! Peers of a table publish short-lived (ephemeral-kind) events tagged with a value derived from
 //! the table code. The content is encrypted with a key derived from the same code, so relays only
 //! see random-looking blobs from throwaway keys: no names, no IP addresses, no game data.
+//!
+//! The key comes from the code through scrypt, so someone watching the relays who wants to read
+//! a room must pay that cost for every code they guess (codes have 50 bits; older 8-character
+//! codes 40). The tag is derived from the key, not from the code directly.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -62,7 +66,7 @@ impl Chiavi {
     }
 }
 
-/// The secrets derived from a table code.
+/// The secrets derived from a table code (with scrypt, so guessing codes is slow).
 #[derive(Clone)]
 pub struct Stanza {
     chiave: [u8; 32],
@@ -70,12 +74,32 @@ pub struct Stanza {
     pub etichetta: String,
 }
 
+/// scrypt cost: 2^15 rounds, r = 8, p = 1 (32 MiB). About 45 ms on a desktop in release builds
+/// and a few times that on a mid-range phone, once per table: an attacker watching the relays
+/// pays it for every guess of the code.
+const COSTO_LOG2: u8 = 15;
+
+impl std::fmt::Debug for Stanza {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // never the key
+        write!(f, "Stanza({})", self.etichetta)
+    }
+}
+
 impl Stanza {
     pub fn new(codice: &str) -> Stanza {
         let codice = normalizza_codice(codice);
-        let chiave: [u8; 32] = Sha256::digest(format!("bazzica/stanza/v1/{codice}")).into();
+        let mut chiave = [0u8; 32];
+        let parametri = scrypt::Params::new(COSTO_LOG2, 8, 1, chiave.len()).expect("valid");
+        scrypt::scrypt(
+            codice.as_bytes(),
+            b"bazzica/stanza/v2",
+            &parametri,
+            &mut chiave,
+        )
+        .expect("32-byte output");
         let etichetta =
-            esa(&Sha256::digest([b"bazzica/etichetta/v1/".as_slice(), &chiave].concat())[..16]);
+            esa(&Sha256::digest([b"bazzica/etichetta/v2/".as_slice(), &chiave].concat())[..16]);
         Stanza { chiave, etichetta }
     }
 
@@ -108,10 +132,10 @@ pub fn normalizza_codice(codice: &str) -> String {
         .collect()
 }
 
-/// A new table code: 8 characters from an alphabet without look-alikes (~40 bits).
+/// A new table code: 10 characters from an alphabet without look-alikes (50 bits).
 pub fn nuovo_codice() -> String {
     const ALFABETO: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    casuale::<8>()
+    casuale::<10>()
         .iter()
         .map(|b| ALFABETO[usize::from(*b) % ALFABETO.len()] as char)
         .collect()
@@ -168,9 +192,21 @@ mod test {
     }
 
     #[test]
+    fn derivazione_v2_nota() {
+        // known answer: scrypt(2^15, 8, 1) of the normalized code, then the tag
+        let s = Stanza::new("abcd-2345 67");
+        assert_eq!(s.etichetta, "e63ef777fb7bc9dba3f2589da97165b6");
+        assert_eq!(
+            format!("{s:?}"),
+            "Stanza(e63ef777fb7bc9dba3f2589da97165b6)",
+            "no key"
+        );
+    }
+
+    #[test]
     fn codici() {
         let c = nuovo_codice();
-        assert_eq!(c.len(), 8);
+        assert_eq!(c.len(), 10);
         assert_eq!(normalizza_codice(&c), c);
     }
 }

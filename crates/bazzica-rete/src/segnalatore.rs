@@ -61,6 +61,9 @@ pub struct NostrSignallerBuilder {
     /// Progress of the signaling, for the UI.
     pub diagnosi: DiagnosiCondivisa,
     pub notizie: NotizieCondivise,
+    /// The room derived from the code, kept: deriving it is deliberately slow, and matchbox
+    /// makes a new signaller on every reconnection attempt.
+    pub stanza: Arc<Mutex<Option<(String, Stanza)>>>,
 }
 
 impl Default for NostrSignallerBuilder {
@@ -69,6 +72,7 @@ impl Default for NostrSignallerBuilder {
             relays: RELAY_PREDEFINITI.map(String::from).to_vec(),
             diagnosi: DiagnosiCondivisa::default(),
             notizie: NotizieCondivise::default(),
+            stanza: Arc::default(),
         }
     }
 }
@@ -148,6 +152,21 @@ pub struct NostrSignaller {
     notizie: NotizieCondivise,
 }
 
+impl NostrSignallerBuilder {
+    fn stanza(&self, codice: &str) -> Stanza {
+        let codice = &crate::nostr::normalizza_codice(codice);
+        let mut cache = self.stanza.lock().unwrap_or_else(|e| e.into_inner());
+        match &*cache {
+            Some((c, s)) if c == codice => s.clone(),
+            _ => {
+                let s = Stanza::new(codice);
+                *cache = Some((codice.to_owned(), s.clone()));
+                s
+            }
+        }
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl SignallerBuilder for NostrSignallerBuilder {
@@ -156,7 +175,7 @@ impl SignallerBuilder for NostrSignallerBuilder {
         _attempts: Option<u16>,
         codice: String,
     ) -> Result<Box<dyn Signaller>, SignalingError> {
-        let stanza = Stanza::new(&codice);
+        let stanza = self.stanza(&codice);
         let totali = self.relays.len();
         // matchbox retries with a new signaller: keep the last outcome visible meanwhile
         aggiorna(&self.diagnosi, |d| d.relay_totali = totali);
@@ -366,6 +385,23 @@ async fn connetti_entro(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn la_stanza_si_deriva_una_volta() {
+        let b = NostrSignallerBuilder::default();
+        let prima = b.stanza("ABCD234567");
+        let t = std::time::Instant::now();
+        assert_eq!(b.stanza("abcd-2345 67").etichetta, prima.etichetta);
+        assert!(t.elapsed() < std::time::Duration::from_millis(5), "cached");
+        assert_eq!(
+            NostrSignallerBuilder::default()
+                .stanza("ABCD234567")
+                .etichetta,
+            prima.etichetta,
+            "two builders, same room"
+        );
+        assert_ne!(b.stanza("ZZZZ234567").etichetta, prima.etichetta);
+    }
 
     #[test]
     fn frame_dei_relay() {
