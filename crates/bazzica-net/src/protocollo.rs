@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, Voce};
 
 /// Bumped on any incompatible change to the messages or to the replicated state.
-pub const VERSIONE_PROTOCOLLO: u32 = 1;
+pub const VERSIONE_PROTOCOLLO: u32 = 2;
 
 /// What a player asks the host to do. The host checks permissions and turns it into a [`Voce`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

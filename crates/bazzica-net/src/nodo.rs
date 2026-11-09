@@ -23,7 +23,7 @@ use crate::tavolo::{
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Bot "thinking" time range, in ms.
+    /// Bot "thinking" time range at the normal pace, in ms (the table's [`Ritmo`] scales it).
     pub ritardo_bot: (u64, u64),
     /// Pause before the next hand in bot-only games, in ms.
     pub pausa_fine_mano: u64,
@@ -34,7 +34,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            ritardo_bot: (800, 1500),
+            ritardo_bot: (1300, 2200),
             pausa_fine_mano: 2000,
             pausa_palo: 3000,
         }
@@ -775,7 +775,9 @@ impl<P: Clone + Ord> Nodo<P> {
             })
         } else {
             bot_da_far_agire(t).map(|(s, attende)| {
+                let ritmo = t.impostazioni.ritmo;
                 let (lo, hi) = self.config.ritardo_bot;
+                let (lo, hi) = (ritmo.scala(lo), ritmo.scala(hi));
                 let mut r = lo + (self.rng.random() * (hi - lo) as f64) as u64;
                 if attende && st.fase != Fase::Scambio {
                     r = r.min(300);

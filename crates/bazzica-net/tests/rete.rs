@@ -471,6 +471,41 @@ fn partita_solo_bot_osservata() {
     assert_eq!(r.tavolo(a).stato, StatoTavolo::Finita);
 }
 
+/// Simulated time a bot-only game takes at a given bot pace.
+fn durata_partita_bot(ritmo: Ritmo) -> u64 {
+    let mut r = Rete::new();
+    let a = r.crea(
+        "a",
+        Impostazioni {
+            ritmo,
+            ..imp(Variante::Vanilla)
+        },
+    );
+    for s in 0..4 {
+        r.richiedi(
+            a,
+            Richiesta::Bot {
+                posto: s,
+                aggiungi: true,
+            },
+        );
+    }
+    let inizio = r.ora;
+    r.richiedi(a, Richiesta::Avvia);
+    r.gioca_fino(u64::MAX);
+    assert_eq!(r.tavolo(a).stato, StatoTavolo::Finita);
+    r.ora - inizio
+}
+
+#[test]
+fn il_ritmo_rallenta_o_accelera_i_bot() {
+    let [calmo, normale, svelto] = Ritmo::TUTTI.map(durata_partita_bot);
+    assert!(
+        calmo > normale && normale > svelto,
+        "{calmo} {normale} {svelto}"
+    );
+}
+
 #[test]
 fn messaggio_perso_si_recupera() {
     let (mut r, _, b, c) = tavolo_tipico(Variante::Vanilla);

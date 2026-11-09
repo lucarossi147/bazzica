@@ -57,6 +57,45 @@ pub struct Impostazioni {
     /// Seconds for each human play; 0 disables the timer.
     pub timer_giocata: u32,
     pub squadre: [String; 2],
+    /// How long bots "think" before playing.
+    #[serde(default)]
+    pub ritmo: Ritmo,
+}
+
+/// Bot pace: a factor on the node's base bot delay, so everyone can follow the plays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ritmo {
+    Calmo,
+    #[default]
+    Normale,
+    Svelto,
+}
+
+impl Ritmo {
+    pub const TUTTI: [Ritmo; 3] = [Ritmo::Calmo, Ritmo::Normale, Ritmo::Svelto];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Ritmo::Calmo => "Calmo",
+            Ritmo::Normale => "Normale",
+            Ritmo::Svelto => "Svelto",
+        }
+    }
+
+    pub fn da_nome(nome: &str) -> Option<Ritmo> {
+        Ritmo::TUTTI.into_iter().find(|r| r.nome() == nome)
+    }
+
+    /// Scales a delay in ms (percent factors keep the arithmetic exact).
+    pub fn scala(self, ms: u64) -> u64 {
+        let percento = match self {
+            Ritmo::Calmo => 160,
+            Ritmo::Normale => 100,
+            Ritmo::Svelto => 50,
+        };
+        ms * percento / 100
+    }
 }
 
 impl Default for Impostazioni {
@@ -68,6 +107,7 @@ impl Default for Impostazioni {
             timer_scambio: 30,
             timer_giocata: 15,
             squadre: NOMI_SQUADRE.map(String::from),
+            ritmo: Ritmo::default(),
         }
     }
 }
@@ -382,5 +422,29 @@ impl Tavolo {
         if fase == Some(Fase::FinePartita) {
             self.stato = StatoTavolo::Finita;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn il_ritmo_scala_il_ritardo() {
+        assert_eq!(Ritmo::Calmo.scala(1000), 1600);
+        assert_eq!(Ritmo::Normale.scala(1000), 1000);
+        assert_eq!(Ritmo::Svelto.scala(1000), 500);
+        for r in Ritmo::TUTTI {
+            assert_eq!(Ritmo::da_nome(r.nome()), Some(r));
+        }
+        assert_eq!(Ritmo::da_nome("boh"), None);
+    }
+
+    #[test]
+    fn impostazioni_senza_ritmo_usano_il_normale() {
+        let mut v = serde_json::to_value(Impostazioni::default()).unwrap();
+        v.as_object_mut().unwrap().remove("ritmo");
+        let imp: Impostazioni = serde_json::from_value(v).unwrap();
+        assert_eq!(imp.ritmo, Ritmo::Normale);
     }
 }
