@@ -44,7 +44,7 @@ fn config() -> Config {
         ritardo_bot: (100, 300),
         pausa_fine_mano: 500,
         pausa_palo: 3000,
-        ..Config::default()
+        attesa_istantanea_ms: 500,
     }
 }
 
