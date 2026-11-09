@@ -9,6 +9,7 @@ mod guida;
 mod home;
 mod partita;
 mod profilo;
+mod riapertura;
 mod stanza;
 
 use std::collections::BTreeSet;
@@ -364,8 +365,9 @@ fn App() -> Element {
                 nascosto_da.get_or_insert(adesso);
                 continue;
             }
-            let dormito = nascosto_da.take().is_some_and(|t| adesso > t + 3000);
-            if (dormito || *c.caduta.borrow()) && adesso > ultima_riapertura + 5000 {
+            let dormito_ms = nascosto_da.take().map(|t| adesso - t);
+            let caduta = c.cicli.borrow().caduta();
+            if riapertura::deve_riaprire(caduta, adesso, ultima_riapertura, dormito_ms) {
                 ultima_riapertura = adesso;
                 c.riapri();
             }

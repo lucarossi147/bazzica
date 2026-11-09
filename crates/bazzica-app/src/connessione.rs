@@ -1,6 +1,6 @@
 //! The live table session: WebRTC socket + protocol node, pumped by a timer loop.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use bazzica_net::{Config, Effimero, Errore, Impostazioni, Nodo, Richiesta, Uscita};
@@ -10,6 +10,7 @@ use bazzica_rete::{NostrSignallerBuilder, Sessione, Turn};
 use dioxus::core::spawn_forever;
 
 use crate::profilo::{Profilo, leggi, scrivi};
+use crate::riapertura::Cicli;
 
 const CHIAVE_TURN: &str = "bazzica.turn";
 
@@ -44,10 +45,8 @@ pub fn seme() -> u64 {
 pub struct Connessione {
     pub codice: String,
     pub sessione: RefCell<Sessione>,
-    /// Set when the message loop ended (signaling lost and no peers): time to reopen.
-    pub caduta: Rc<RefCell<bool>>,
-    /// Which message loop is the current one (bumped by every reopening).
-    generazione: Rc<Cell<u64>>,
+    /// The message loops; the current one ending (signaling lost, no peers) means reopen.
+    pub cicli: Rc<RefCell<Cicli>>,
     /// When the current connection attempt started (ms), for the diagnostics.
     pub aperta: RefCell<u64>,
 }
@@ -77,8 +76,7 @@ impl Connessione {
         let c = Rc::new(Connessione {
             codice: codice.to_owned(),
             sessione: RefCell::new(sessione),
-            caduta: Rc::new(RefCell::new(false)),
-            generazione: Rc::default(),
+            cicli: Rc::default(),
             aperta: RefCell::new(ora()),
         });
         c.avvia_ciclo(ciclo);
@@ -86,21 +84,19 @@ impl Connessione {
     }
 
     fn avvia_ciclo(&self, ciclo: bazzica_rete::matchbox::MessageLoopFuture) {
-        let caduta = self.caduta.clone();
-        *caduta.borrow_mut() = false;
-        let generazione = self.generazione.get() + 1;
-        self.generazione.set(generazione);
-        let attuale = self.generazione.clone();
-        log::info!("apertura della connessione al tavolo {}", self.codice);
+        let cicli = self.cicli.clone();
+        let mia = cicli.borrow_mut().avvia();
+        log::info!(
+            "apertura della connessione al tavolo {} (generazione {mia})",
+            self.codice
+        );
         // not tied to the component that asked (it may unmount while the loop must go on)
         spawn_forever(async move {
             if let Err(e) = ciclo.await {
-                log::warn!("connessione caduta: {e}");
+                log::warn!("connessione caduta (generazione {mia}): {e}");
             }
             // a loop replaced by `riapri` also ends here: only the current one counts
-            if attuale.get() == generazione {
-                *caduta.borrow_mut() = true;
-            }
+            cicli.borrow_mut().finito(mia);
         });
     }
 
