@@ -159,7 +159,11 @@ fn entra_in_un_tavolo_gia_creato() {
     }
     let mut ospite = apri(Nodo::unisciti(io("b"), 2, config()));
     let t0 = Instant::now();
-    while !ospite.nodo().tavolo().is_some_and(|t| t.partecipanti.len() == 2) {
+    while !ospite
+        .nodo()
+        .tavolo()
+        .is_some_and(|t| t.partecipanti.len() == 2)
+    {
         assert!(
             t0.elapsed() < Duration::from_secs(30),
             "timeout: host {:?}, guest {:?}",

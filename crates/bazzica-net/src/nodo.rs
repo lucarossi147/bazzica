@@ -220,6 +220,21 @@ impl<P: Clone + Ord> Nodo<P> {
             .min()
     }
 
+    /// Checks the node's internal invariants (for tests and debug assertions):
+    /// I1, the log covers the replica exactly (`tavolo.n == log_base + log.len()`).
+    pub fn verifica_invarianti(&self) -> Result<(), String> {
+        match &self.tavolo {
+            Some(t) if t.n != self.log_base + self.log.len() as u64 => Err(format!(
+                "I1: {} n={} but log_base={} + log={}",
+                self.io.id,
+                t.n,
+                self.log_base,
+                self.log.len()
+            )),
+            _ => Ok(()),
+        }
+    }
+
     pub fn uscite(&mut self) -> Vec<Uscita<P>> {
         std::mem::take(&mut self.uscite)
     }
