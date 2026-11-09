@@ -46,6 +46,7 @@ fn config() -> Config {
         pausa_palo: 3000,
         attesa_istantanea_ms: 500,
         attesa_allineamento_ms: 1000,
+        attesa_richiesta_ms: 1000,
     }
 }
 
@@ -1333,4 +1334,66 @@ fn richiesta_duplicata_ignorata() {
     assert_eq!(r.tavolo(a).posti_di("c"), [1]);
     assert!(r.rifiuti.is_empty(), "{:?}", r.rifiuti);
     r.assert_sincronizzati();
+}
+
+/// Bots move until it is seat `s`'s turn to play a card.
+fn fino_al_turno_di(r: &mut Rete, s: u8) {
+    for _ in 0..200 {
+        let st = r.tavolo(r.host_h()).partita.clone().unwrap();
+        if st.fase == Fase::Gioco && st.required_actors().contains(&s) {
+            return;
+        }
+        r.avanza(1_000);
+    }
+    panic!("seat {s} never got the turn");
+}
+
+#[test]
+fn richiesta_non_piu_valida_scartata() {
+    let (mut r, a, b, _) = tavolo_tipico(Variante::Vanilla);
+    fino_al_turno_di(&mut r, 2);
+    let st = r.tavolo(b).partita.clone().unwrap();
+    let mossa = st
+        .legal_actions(2)
+        .into_iter()
+        .find(|m| matches!(m, Azione::Gioca { .. }))
+        .unwrap();
+    // b's move and its resends are lost until the turn timer plays for b
+    for _ in 0..50 {
+        r.perdi(b, a, |m| matches!(m, Messaggio::Richiesta { .. }));
+    }
+    r.richiedi(b, Richiesta::Azione(mossa));
+    assert_eq!(r.nodo(b).richieste_in_corso(), 1);
+    while !r
+        .voci
+        .iter()
+        .any(|v| matches!(v, Voce::Scaduto { seat: Some(2), .. }))
+    {
+        r.avanza(1_000);
+    }
+    r.da_perdere.clear();
+    r.avanza(5_000);
+    assert_eq!(r.nodo(b).richieste_in_corso(), 0, "dropped, not resent");
+    assert!(!r.rifiuti.contains_key(&b), "{:?}", r.rifiuti);
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn doppio_tocco_una_sola_richiesta() {
+    let (mut r, a, b, _) = tavolo_tipico(Variante::Vanilla);
+    fino_al_turno_di(&mut r, 2);
+    let st = r.tavolo(b).partita.clone().unwrap();
+    let mossa = st.legal_actions(2).remove(0);
+    let (ora, prima) = (r.ora, r.inviati.len());
+    let nodo = r.nodi.get_mut(&b).unwrap();
+    let rid = nodo.richiedi(ora, Richiesta::Azione(mossa.clone()));
+    assert_eq!(nodo.richiedi(ora, Richiesta::Azione(mossa)), rid);
+    r.pompa();
+    let mandate = r.inviati[prima..]
+        .iter()
+        .filter(|(da, d, m)| *da == b && *d == a && matches!(m, Messaggio::Richiesta { .. }))
+        .count();
+    assert_eq!(mandate, 1);
+    assert!(r.rifiuti.is_empty(), "{:?}", r.rifiuti);
+    assert_eq!(r.nodo(b).richieste_in_corso(), 0, "acknowledged");
 }

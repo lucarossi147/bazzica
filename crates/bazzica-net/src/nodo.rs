@@ -10,6 +10,12 @@
 //! If the host leaves, the first connected participant in join order takes over with a higher
 //! `epoca`; peers that are ahead hand it their replica, peers that are behind catch up.
 //!
+//! Requests: a follower keeps each request until the host acknowledges it (`Ricevuta`, sent
+//! after the entry) or refuses it (`Rifiuto`), and resends it with the same id to the new host
+//! after a takeover or after [`Config::attesa_richiesta_ms`]. The host ignores ids it already
+//! handled for that session (acknowledging them again). A request identical to a pending one
+//! (a double tap) is not sent again, and a move that is no longer legal locally is dropped.
+//!
 //! Elections: candidates are peers known to hold a replica (`Ciao.replica`, refreshed by
 //! `HoReplica` when a peer gets its first snapshot). A peer claims only with a strict majority
 //! of the participants the host last reported connected (`Presenti`, sent by the host whenever
@@ -64,6 +70,8 @@ pub struct Config {
     pub attesa_istantanea_ms: u64,
     /// How long a new host waits for its peers' `Allineato` before sequencing, in ms.
     pub attesa_allineamento_ms: u64,
+    /// How long a request may go unacknowledged before it is sent again, in ms.
+    pub attesa_richiesta_ms: u64,
 }
 
 impl Default for Config {
@@ -74,6 +82,7 @@ impl Default for Config {
             pausa_palo: 3000,
             attesa_istantanea_ms: 3000,
             attesa_allineamento_ms: 2000,
+            attesa_richiesta_ms: 3000,
         }
     }
 }
@@ -145,6 +154,14 @@ enum InCoda<P> {
     Entra(Partecipante),
 }
 
+/// A request of the local user sent to the host and not acknowledged yet.
+#[derive(Clone, Debug)]
+struct Pendente {
+    richiesta: Richiesta,
+    /// When it was last sent, in ms.
+    inviata: u64,
+}
+
 /// A snapshot asked for and not received yet.
 #[derive(Clone, Debug)]
 struct RichiestaIstantanea<P> {
@@ -191,8 +208,12 @@ pub struct Nodo<P> {
     /// Connected peers and, once they said hello, who they are.
     peers: BTreeMap<P, Option<Remoto>>,
     rid: u64,
+    /// Requests sent to the host and not acknowledged, by request id.
+    pendenti: BTreeMap<u64, Pendente>,
     attesa_istantanea: Option<RichiestaIstantanea<P>>,
     // host only
+    /// Last request id handled per session of each participant, to ignore duplicates.
+    ultimi_rid: BTreeMap<Regia, u64>,
     /// Set from a won election until the peers answered: nothing is sequenced meanwhile.
     allineamento: Option<Allineamento<P>>,
     piano: Option<(u64, u64, Piano)>,
@@ -237,6 +258,8 @@ impl<P: Clone + Ord> Nodo<P> {
             host: None,
             peers: BTreeMap::new(),
             rid: 0,
+            pendenti: BTreeMap::new(),
+            ultimi_rid: BTreeMap::new(),
             attesa_istantanea: None,
             allineamento: None,
             piano: None,
@@ -343,6 +366,10 @@ impl<P: Clone + Ord> Nodo<P> {
             self.timer.as_ref().map(|t| t.1),
             istantanea,
             self.allineamento.as_ref().map(|a| a.scadenza),
+            self.pendenti
+                .values()
+                .map(|x| x.inviata + self.config.attesa_richiesta_ms)
+                .min(),
         ]
         .into_iter()
         .flatten()
@@ -443,6 +470,7 @@ impl<P: Clone + Ord> Nodo<P> {
             return;
         }
         self.ripeti_istantanea();
+        self.ripeti_richieste(false);
         if self
             .allineamento
             .as_ref()
@@ -479,21 +507,69 @@ impl<P: Clone + Ord> Nodo<P> {
         } else if self.e_host() {
             let id = self.io.id.clone();
             self.richiesta_al_host(None, self.rid, id, r);
-        } else if let Some(p) = self.peer_host() {
-            self.invia(
-                Destinatario::Uno(p),
-                Messaggio::Richiesta {
-                    rid: self.rid,
-                    richiesta: r,
-                },
-            );
-        } else {
+        } else if self.host.is_none() {
             self.uscite.push(Uscita::Rifiutata {
                 motivo: "Nessun host raggiungibile".into(),
             });
+        } else if let Some((&rid, _)) = self.pendenti.iter().find(|(_, x)| x.richiesta == r) {
+            // a double tap: the same request is already on its way
+            return rid;
+        } else {
+            // sent now if the host is reachable, else when it is (see `ripeti_richieste`)
+            self.pendenti.insert(
+                self.rid,
+                Pendente {
+                    richiesta: r.clone(),
+                    inviata: self.ora,
+                },
+            );
+            if let Some(p) = self.peer_host() {
+                self.invia(
+                    Destinatario::Uno(p),
+                    Messaggio::Richiesta {
+                        rid: self.rid,
+                        richiesta: r,
+                    },
+                );
+            }
         }
         self.controlla();
         self.rid
+    }
+
+    /// Requests sent to the host and not acknowledged yet (for an "invio…" hint in the UI).
+    pub fn richieste_in_corso(&self) -> usize {
+        self.pendenti.len()
+    }
+
+    /// Sends the pending requests again (same ids) to the current host: all of them when
+    /// `tutte`, else those unacknowledged for [`Config::attesa_richiesta_ms`]. Drops the ones
+    /// that no longer make sense (a move that is not legal any more, e.g. the timer played it).
+    fn ripeti_richieste(&mut self, tutte: bool) {
+        let superate: Vec<u64> = self
+            .pendenti
+            .iter()
+            .filter(|(_, x)| !ancora_sensata(self.tavolo.as_ref(), &x.richiesta))
+            .map(|(rid, _)| *rid)
+            .collect();
+        for rid in superate {
+            self.pendenti.remove(&rid);
+        }
+        let Some(p) = self.peer_host() else { return };
+        let (ora, attesa) = (self.ora, self.config.attesa_richiesta_ms);
+        let mut da_mandare = vec![];
+        for (rid, x) in self.pendenti.iter_mut() {
+            if tutte || ora >= x.inviata + attesa {
+                x.inviata = ora;
+                da_mandare.push(Messaggio::Richiesta {
+                    rid: *rid,
+                    richiesta: x.richiesta.clone(),
+                });
+            }
+        }
+        for m in da_mandare {
+            self.invia(Destinatario::Uno(p.clone()), m);
+        }
     }
 
     /// A cosmetic effect of the local user (phrase, card drag): sent to everyone directly.
@@ -562,11 +638,24 @@ impl<P: Clone + Ord> Nodo<P> {
         match msg {
             Messaggio::Ciao { .. } | Messaggio::Sostituito => unreachable!(),
             Messaggio::Richiesta { rid, richiesta } => {
-                if self.e_host() {
-                    self.richiesta_al_host(Some(p), rid, da, richiesta);
+                if !self.e_host() {
+                    return;
                 }
+                // a resend of a request already handled: acknowledge it again, nothing else
+                let ultimo = self.ultimi_rid.entry(regia).or_default();
+                if rid <= *ultimo {
+                    return self.invia(Destinatario::Uno(p), Messaggio::Ricevuta { rid });
+                }
+                *ultimo = rid;
+                self.richiesta_al_host(Some(p), rid, da, richiesta);
             }
-            Messaggio::Rifiuto { motivo, .. } => self.uscite.push(Uscita::Rifiutata { motivo }),
+            Messaggio::Ricevuta { rid } => {
+                self.pendenti.remove(&rid);
+            }
+            Messaggio::Rifiuto { rid, motivo } => {
+                self.pendenti.remove(&rid);
+                self.uscite.push(Uscita::Rifiutata { motivo });
+            }
             Messaggio::Voce {
                 epoca,
                 n,
@@ -707,14 +796,15 @@ impl<P: Clone + Ord> Nodo<P> {
             });
             return;
         }
-        if let Err(e) = self.esegui(&id, richiesta) {
-            match da {
-                Some(p) => self.invia(
-                    Destinatario::Uno(p),
-                    Messaggio::Rifiuto { rid, motivo: e.0 },
-                ),
-                None => self.uscite.push(Uscita::Rifiutata { motivo: e.0 }),
-            }
+        // after the entry, so the requester sees it before the acknowledgement
+        match (self.esegui(&id, richiesta), da) {
+            (Ok(()), Some(p)) => self.invia(Destinatario::Uno(p), Messaggio::Ricevuta { rid }),
+            (Ok(()), None) => {}
+            (Err(e), Some(p)) => self.invia(
+                Destinatario::Uno(p),
+                Messaggio::Rifiuto { rid, motivo: e.0 },
+            ),
+            (Err(e), None) => self.uscite.push(Uscita::Rifiutata { motivo: e.0 }),
         }
     }
 
@@ -1003,6 +1093,7 @@ impl<P: Clone + Ord> Nodo<P> {
 
     /// Follows `host` from `epoca` on (stepping down if we were host).
     fn segui(&mut self, epoca: u64, host: Regia) {
+        let nuovo = self.host.as_ref() != Some(&host);
         if (epoca, Some(&host)) != (self.epoca, self.host.as_ref()) {
             self.attesa_istantanea = None;
         }
@@ -1011,8 +1102,24 @@ impl<P: Clone + Ord> Nodo<P> {
         if !self.e_host() {
             self.piano = None;
             self.timer = None;
-            // queued requests are dropped: their senders retry with the new host
-            self.allineamento = None;
+            // queued requests of others are dropped (their senders retry with the new host);
+            // our own become pending again
+            let in_coda = self.allineamento.take().map(|a| a.in_coda);
+            for lavoro in in_coda.into_iter().flatten() {
+                if let InCoda::Richiesta {
+                    da: None,
+                    rid,
+                    richiesta,
+                    ..
+                } = lavoro
+                {
+                    let inviata = self.ora;
+                    self.pendenti.insert(rid, Pendente { richiesta, inviata });
+                }
+            }
+            if nuovo {
+                self.ripeti_richieste(true);
+            }
         }
     }
 
@@ -1053,7 +1160,16 @@ impl<P: Clone + Ord> Nodo<P> {
                     .collect(),
                 scadenza: self.ora + self.config.attesa_allineamento_ms,
                 rapporti: vec![],
-                in_coda: vec![],
+                // our own pending requests are now ours to sequence
+                in_coda: std::mem::take(&mut self.pendenti)
+                    .into_iter()
+                    .map(|(rid, x)| InCoda::Richiesta {
+                        da: None,
+                        rid,
+                        id: self.io.id.clone(),
+                        richiesta: x.richiesta,
+                    })
+                    .collect(),
             });
             self.invia(
                 Destinatario::Tutti,
@@ -1392,6 +1508,17 @@ fn chiave_timer(t: &Tavolo) -> Option<ChiaveTimer> {
         });
     }
     None
+}
+
+/// Whether a pending request is still worth sending: a move must still be legal locally.
+fn ancora_sensata(t: Option<&Tavolo>, r: &Richiesta) -> bool {
+    match r {
+        Richiesta::Azione(a) => t
+            .and_then(|t| t.partita.as_ref())
+            .zip(a.seat())
+            .is_some_and(|(st, s)| st.legal_actions(s).contains(a)),
+        _ => true,
+    }
 }
 
 /// Whether `raggiunti` holds a strict majority of `vista` (an empty view gives no constraint).

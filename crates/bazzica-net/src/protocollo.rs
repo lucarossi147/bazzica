@@ -13,7 +13,8 @@ use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, Voce};
 /// - 4: [`Sessione`] in `Ciao`, the host's [`Regia`] in `Istantanea`, `Sostituito`.
 /// - 5: `HoReplica` (fixes stale replica flags), `Presenti` (the host's view, for the
 ///   majority rule of elections).
-pub const VERSIONE_PROTOCOLLO: u32 = 5;
+/// - 6: `Ricevuta`, the host's acknowledgement of a request.
+pub const VERSIONE_PROTOCOLLO: u32 = 6;
 
 /// One run of the app (a page load) for an identity. When two runs of the same identity are
 /// connected (two tabs, a reload before the old link timed out), the newer one wins: later
@@ -27,7 +28,7 @@ pub struct Sessione {
 }
 
 /// Who hosts: a participant in one of its sessions (another tab of the same id is not host).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Regia {
     pub id: IdGiocatore,
     pub sessione: Sessione,
@@ -77,6 +78,11 @@ pub enum Messaggio {
     Rifiuto {
         rid: u64,
         motivo: String,
+    },
+    /// Host -> player: the request was handled (applied, or a duplicate of one that was).
+    /// Until this or `Rifiuto` arrives, the player resends it (same `rid`) to whoever hosts.
+    Ricevuta {
+        rid: u64,
     },
     /// Host -> everyone: entry number `n` of the log and the replica hash after applying it.
     Voce {
