@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sync_wrapper::SyncWrapper;
 
+use crate::ice::{DiagnosiCondivisa, aggiorna};
 use crate::nostr::{Chiavi, KIND_SEGNALE, Stanza, casuale};
 use crate::ws;
 
@@ -33,12 +34,15 @@ pub const RELAY_PREDEFINITI: [&str; 4] = [
 #[derive(Debug, Clone)]
 pub struct NostrSignallerBuilder {
     pub relays: Vec<String>,
+    /// Progress of the signaling, for the UI.
+    pub diagnosi: DiagnosiCondivisa,
 }
 
 impl Default for NostrSignallerBuilder {
     fn default() -> Self {
         NostrSignallerBuilder {
             relays: RELAY_PREDEFINITI.map(String::from).to_vec(),
+            diagnosi: DiagnosiCondivisa::default(),
         }
     }
 }
@@ -86,6 +90,7 @@ pub struct NostrSignaller {
     pendenti: VecDeque<PeerEvent>,
     noti: HashSet<PeerId>,
     visti: HashSet<String>,
+    diagnosi: DiagnosiCondivisa,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -97,6 +102,9 @@ impl SignallerBuilder for NostrSignallerBuilder {
         codice: String,
     ) -> Result<Box<dyn Signaller>, SignalingError> {
         let stanza = Stanza::new(&codice);
+        let totali = self.relays.len();
+        // matchbox retries with a new signaller: keep the last outcome visible meanwhile
+        aggiorna(&self.diagnosi, |d| d.relay_totali = totali);
         let connessioni =
             futures::future::join_all(self.relays.iter().map(|r| connetti_entro(r, ATTESA_RELAY)))
                 .await;
@@ -115,6 +123,8 @@ impl SignallerBuilder for NostrSignallerBuilder {
                 Err(e) => log::warn!("relay {relay}: {e}"),
             }
         }
+        let collegati = uscite.len();
+        aggiorna(&self.diagnosi, |d| d.relay_collegati = Some(collegati));
         if uscite.is_empty() {
             return Err(errore("nessun relay Nostr raggiungibile"));
         }
@@ -128,6 +138,7 @@ impl SignallerBuilder for NostrSignallerBuilder {
             pendenti: VecDeque::from([PeerEvent::IdAssigned(io)]),
             noti: HashSet::new(),
             visti: HashSet::new(),
+            diagnosi: self.diagnosi.clone(),
         };
         s.pubblica(&Busta::Annuncio { da: io, a: None }).await?;
         Ok(Box::new(s))
@@ -206,6 +217,8 @@ impl Signaller for NostrSignaller {
 
     async fn next_message(&mut self) -> Result<PeerEvent, SignalingError> {
         loop {
+            let visti = self.noti.len();
+            aggiorna(&self.diagnosi, |d| d.peer_visti = visti);
             if let Some(e) = self.pendenti.pop_front() {
                 return Ok(e);
             }

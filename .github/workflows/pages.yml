@@ -30,6 +30,12 @@ jobs:
       - name: Bundle
         working-directory: crates/bazzica-app
         run: dx bundle --platform web --release
+        # optional TURN relay for players on different networks (Settings > Secrets > Actions);
+        # without these secrets the app uses STUN only
+        env:
+          BAZZICA_TURN_URLS: ${{ secrets.BAZZICA_TURN_URLS }}
+          BAZZICA_TURN_USERNAME: ${{ secrets.BAZZICA_TURN_USERNAME }}
+          BAZZICA_TURN_CREDENTIAL: ${{ secrets.BAZZICA_TURN_CREDENTIAL }}
       - name: Single-page app fallback
         run: cp crates/bazzica-app/dist/public/index.html crates/bazzica-app/dist/public/404.html
       - uses: actions/upload-pages-artifact@v5

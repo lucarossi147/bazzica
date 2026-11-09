@@ -8,7 +8,7 @@ use bazzica_core::bots::{Agent, HeuristicAgent};
 use bazzica_core::{Azione, Fase};
 use bazzica_net::{Config, Impostazioni, Nodo, Partecipante, Richiesta, StatoTavolo};
 use bazzica_rete::nostr::nuovo_codice;
-use bazzica_rete::{NostrSignallerBuilder, Sessione};
+use bazzica_rete::{NostrSignallerBuilder, Sessione, Turn};
 
 fn io(id: &str) -> Partecipante {
     Partecipante {
@@ -40,7 +40,12 @@ fn quattro_peer_su_nostr_e_webrtc() {
         } else {
             Nodo::unisciti(io(id), i as u64, config())
         };
-        let (s, ciclo) = Sessione::apri(&codice, NostrSignallerBuilder::default(), nodo);
+        let (s, ciclo) = Sessione::apri(
+            &codice,
+            NostrSignallerBuilder::default(),
+            nodo,
+            Turn::di_compilazione(),
+        );
         std::thread::spawn(move || {
             if let Err(e) = smol::block_on(ciclo) {
                 println!("ciclo terminato: {e}");

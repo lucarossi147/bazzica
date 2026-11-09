@@ -114,6 +114,8 @@ pub struct Nodo<P> {
     timer: Option<(ChiaveTimer, u64)>,
     ultimo_palo: [Option<u64>; 4],
     uscite: Vec<Uscita<P>>,
+    /// Protocol version of a peer we had to ignore (it runs another build of the app).
+    versione_altrui: Option<u32>,
 }
 
 impl<P: Clone + Ord> Nodo<P> {
@@ -148,6 +150,7 @@ impl<P: Clone + Ord> Nodo<P> {
             timer: None,
             ultimo_palo: [None; 4],
             uscite: vec![],
+            versione_altrui: None,
         }
     }
 
@@ -155,6 +158,11 @@ impl<P: Clone + Ord> Nodo<P> {
 
     pub fn io(&self) -> &Partecipante {
         &self.io
+    }
+
+    /// Set when a connected peer runs an incompatible build: both must reload the app.
+    pub fn versione_altrui(&self) -> Option<u32> {
+        self.versione_altrui
     }
 
     pub fn tavolo(&self) -> Option<&Tavolo> {
@@ -323,6 +331,8 @@ impl<P: Clone + Ord> Nodo<P> {
         {
             if versione == VERSIONE_PROTOCOLLO {
                 self.ciao(p, io, replica);
+            } else {
+                self.versione_altrui = Some(versione);
             }
             return;
         }

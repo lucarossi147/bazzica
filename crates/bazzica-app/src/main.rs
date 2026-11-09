@@ -2,6 +2,7 @@
 //! (WebRTC, introduced through public Nostr relays).
 
 mod carte;
+mod collegamento;
 mod connessione;
 mod fx;
 mod guida;
@@ -379,26 +380,11 @@ fn App() -> Element {
         document::Stylesheet { href: asset!("/assets/style.css") }
         match (conn, vista) {
             (None, _) => rsx! { home::Home {} },
-            (Some(c), None) => rsx! { Attesa { codice: c.codice.clone() } },
+            (Some(c), None) => rsx! { collegamento::Attesa { codice: c.codice.clone() } },
             (Some(_), Some(v)) => rsx! { stanza::Tavolo { vista: v } },
         }
         if let Some((testo, _)) = ctx.avviso.read().clone() {
             div { class: "avviso", onclick: move |_| { let mut a = ctx.avviso; a.set(None) }, "{testo}" }
-        }
-    }
-}
-
-#[component]
-fn Attesa(codice: String) -> Element {
-    let ctx = use_context::<Ctx>();
-    rsx! {
-        div { class: "schermo centrato",
-            h1 { class: "logo", "Bazzica" }
-            div { class: "pannello",
-                p { "Collegamento al tavolo " b { "{codice}" } "…" }
-                p { class: "nota", "Serve che almeno un altro giocatore del tavolo sia collegato." }
-                button { class: "secondario", onclick: move |_| ctx.esci(), "Annulla" }
-            }
         }
     }
 }

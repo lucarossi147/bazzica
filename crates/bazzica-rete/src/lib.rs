@@ -2,11 +2,13 @@
 //!
 //! Works in the browser (WASM) and natively. See [`sessione::Sessione`].
 
+pub mod ice;
 pub mod nostr;
 pub mod segnalatore;
 pub mod sessione;
 mod ws;
 
+pub use ice::{Diagnosi, Turn};
 pub use segnalatore::{NostrSignallerBuilder, RELAY_PREDEFINITI};
 pub use sessione::Sessione;
 

@@ -94,6 +94,8 @@ fn Intestazione(vista: Vista, menu: bool) -> Element {
                         }
                         "Suoni ed effetti sonori"
                     }
+                    h3 { "Collegamento" }
+                    crate::collegamento::ServerTurn {}
                     if menu {
                         h3 { "Partita" }
                         partita::Menu {}

@@ -507,6 +507,24 @@ fn il_ritmo_rallenta_o_accelera_i_bot() {
 }
 
 #[test]
+fn versione_diversa_viene_segnalata() {
+    let mut n: Nodo<H> = Nodo::unisciti(io("a"), 1, config());
+    n.connesso(0, 7);
+    n.ricevi(
+        0,
+        7,
+        Messaggio::Ciao {
+            versione: VERSIONE_PROTOCOLLO + 1,
+            io: io("b"),
+            replica: true,
+        },
+    );
+    assert_eq!(n.versione_altrui(), Some(VERSIONE_PROTOCOLLO + 1));
+    assert!(!n.connessi().contains("b"));
+    assert!(n.tavolo().is_none());
+}
+
+#[test]
 fn messaggio_perso_si_recupera() {
     let (mut r, _, b, c) = tavolo_tipico(Variante::Vanilla);
     r.gioca_fino(30);

@@ -6,19 +6,16 @@
 use std::sync::Arc;
 
 use bazzica_net::{Destinatario, Effimero, Errore, Messaggio, Nodo, Richiesta, Uscita};
-use matchbox_socket::{MessageLoopFuture, PeerId, PeerState, RtcIceServerConfig, WebRtcSocket};
+use matchbox_socket::{MessageLoopFuture, PeerId, PeerState, WebRtcSocket};
 
+use crate::ice::{Diagnosi, DiagnosiCondivisa, Turn, leggi, server_ice};
 use crate::segnalatore::NostrSignallerBuilder;
-
-/// Public STUN servers (no account needed). No TURN relay for now.
-pub const STUN: [&str; 2] = [
-    "stun:stun.l.google.com:19302",
-    "stun:stun.cloudflare.com:3478",
-];
 
 pub struct Sessione {
     socket: WebRtcSocket,
     nodo: Nodo<PeerId>,
+    turn: Option<Turn>,
+    diagnosi: DiagnosiCondivisa,
 }
 
 impl Sessione {
@@ -27,35 +24,60 @@ impl Sessione {
         codice: &str,
         segnalatore: NostrSignallerBuilder,
         nodo: Nodo<PeerId>,
+        turn: Option<Turn>,
     ) -> (Sessione, MessageLoopFuture) {
-        let (socket, ciclo) = Self::socket(codice, segnalatore);
-        (Sessione { socket, nodo }, ciclo)
+        let diagnosi = segnalatore.diagnosi.clone();
+        let (socket, ciclo) = Self::socket(codice, segnalatore, turn.as_ref());
+        (
+            Sessione {
+                socket,
+                nodo,
+                turn,
+                diagnosi,
+            },
+            ciclo,
+        )
+    }
+
+    /// How far the signaling got (relays reached, peers seen).
+    pub fn diagnosi(&self) -> Diagnosi {
+        leggi(&self.diagnosi)
+    }
+
+    /// Peers with an open WebRTC link.
+    pub fn peer_collegati(&self) -> usize {
+        self.socket.connected_peers().count()
+    }
+
+    pub fn turn(&self) -> Option<&Turn> {
+        self.turn.as_ref()
     }
 
     /// Rebuilds the WebRTC socket (after the page slept or signaling died), keeping the replica.
+    /// `turn` replaces the TURN relay in use (pass the current one to keep it).
     pub fn riapri(
         &mut self,
         ora: u64,
         codice: &str,
         segnalatore: NostrSignallerBuilder,
+        turn: Option<Turn>,
     ) -> MessageLoopFuture {
         self.nodo.scollega_tutti(ora);
-        let (socket, ciclo) = Self::socket(codice, segnalatore);
+        self.diagnosi = segnalatore.diagnosi.clone();
+        let (socket, ciclo) = Self::socket(codice, segnalatore, turn.as_ref());
         self.socket = socket;
+        self.turn = turn;
         ciclo
     }
 
     fn socket(
         codice: &str,
         segnalatore: NostrSignallerBuilder,
+        turn: Option<&Turn>,
     ) -> (WebRtcSocket, MessageLoopFuture) {
         WebRtcSocket::builder(crate::nostr::normalizza_codice(codice))
             .signaller_builder(Arc::new(segnalatore))
-            .ice_server(RtcIceServerConfig {
-                urls: STUN.map(String::from).to_vec(),
-                username: None,
-                credential: None,
-            })
+            .ice_server(server_ice(turn))
             .signaling_keep_alive_interval(Some(std::time::Duration::from_secs(5)))
             .reconnect_attempts(Some(3))
             .add_reliable_channel()

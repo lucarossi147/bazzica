@@ -6,10 +6,31 @@ use std::rc::Rc;
 use bazzica_net::{Config, Effimero, Errore, Impostazioni, Nodo, Richiesta, Uscita};
 use bazzica_rete::matchbox::PeerId;
 use bazzica_rete::nostr::casuale;
-use bazzica_rete::{NostrSignallerBuilder, Sessione};
+use bazzica_rete::{NostrSignallerBuilder, Sessione, Turn};
 use dioxus::core::spawn_forever;
 
-use crate::profilo::Profilo;
+use crate::profilo::{Profilo, leggi, scrivi};
+
+const CHIAVE_TURN: &str = "bazzica.turn";
+
+/// The TURN relay this device uses: its own setting, else the one built into the app.
+pub fn turn_attivo() -> Option<Turn> {
+    turn_salvato().or_else(Turn::di_compilazione)
+}
+
+/// The TURN relay set on this device (not the built-in one).
+pub fn turn_salvato() -> Option<Turn> {
+    leggi(CHIAVE_TURN).and_then(|s| serde_json::from_str(&s).ok())
+}
+
+pub fn salva_turn(turn: Option<&Turn>) {
+    scrivi(
+        CHIAVE_TURN,
+        &turn.map_or_else(String::new, |t| {
+            serde_json::to_string(t).unwrap_or_default()
+        }),
+    );
+}
 
 /// Milliseconds since the epoch (the node only needs a monotonic-enough clock).
 pub fn ora() -> u64 {
@@ -25,6 +46,8 @@ pub struct Connessione {
     pub sessione: RefCell<Sessione>,
     /// Set when the message loop ended (signaling lost and no peers): time to reopen.
     pub caduta: Rc<RefCell<bool>>,
+    /// When the current connection attempt started (ms), for the diagnostics.
+    pub aperta: RefCell<u64>,
 }
 
 impl Connessione {
@@ -43,11 +66,17 @@ impl Connessione {
     }
 
     fn apri(codice: &str, nodo: Nodo<PeerId>) -> Rc<Connessione> {
-        let (sessione, ciclo) = Sessione::apri(codice, NostrSignallerBuilder::default(), nodo);
+        let (sessione, ciclo) = Sessione::apri(
+            codice,
+            NostrSignallerBuilder::default(),
+            nodo,
+            turn_attivo(),
+        );
         let c = Rc::new(Connessione {
             codice: codice.to_owned(),
             sessione: RefCell::new(sessione),
             caduta: Rc::new(RefCell::new(false)),
+            aperta: RefCell::new(ora()),
         });
         c.avvia_ciclo(ciclo);
         c
@@ -68,11 +97,18 @@ impl Connessione {
 
     /// Rebuilds the transport, keeping the replica (after sleep or a lost signaling link).
     pub fn riapri(&self) {
+        self.riapri_con(turn_attivo());
+    }
+
+    /// Rebuilds the transport with another TURN relay (after the settings changed).
+    pub fn riapri_con(&self, turn: Option<Turn>) {
         let ciclo = self.sessione.borrow_mut().riapri(
             ora(),
             &self.codice,
             NostrSignallerBuilder::default(),
+            turn,
         );
+        *self.aperta.borrow_mut() = ora();
         self.avvia_ciclo(ciclo);
     }
 
