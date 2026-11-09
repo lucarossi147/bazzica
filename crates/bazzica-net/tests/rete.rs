@@ -1496,3 +1496,171 @@ fn giocatore_torna_e_riprende_il_posto() {
     r.gioca_fino(u64::MAX);
     r.assert_sincronizzati();
 }
+
+// ------------------------------------------------------------------ untrusted input (P13)
+
+/// A replica `c` would accept from the host, with `guasta` applied to it.
+fn istantanea_guasta(r: &Rete, c: H, guasta: impl Fn(&mut Tavolo)) -> Vec<u8> {
+    let mut t = r.tavolo(c).clone();
+    guasta(&mut t);
+    Messaggio::Istantanea {
+        epoca: r.nodo(c).epoca(),
+        host: r.nodo(c).host_regia().unwrap().clone(),
+        tavolo: Box::new(t),
+    }
+    .codifica()
+}
+
+#[test]
+fn istantanee_guaste_rifiutate() {
+    let (mut r, a, _, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    let prima = r.tavolo(c).clone();
+    let guasti: [fn(&mut Tavolo); 3] = [
+        |t| t.partita.as_mut().unwrap().mani[0][0] = bazzica_core::Card::IGNOTA,
+        |t| t.partita.as_mut().unwrap().corrente = 9,
+        |t| t.partita.as_mut().unwrap().mazzo.clear(),
+    ];
+    for guasta in guasti {
+        let b = istantanea_guasta(&r, c, guasta);
+        r.coda.push_back((a, c, b));
+        r.pompa();
+        assert_eq!(r.tavolo(c), &prima, "an invalid snapshot was adopted");
+    }
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn striscia_con_posto_impossibile() {
+    let (mut r, a, _, c) = tavolo_tipico(Variante::Vanilla);
+    let m = Messaggio::Effimero(Effimero::Striscia {
+        seat: 255,
+        verso: 2,
+    });
+    r.coda.push_back((a, c, m.codifica()));
+    r.pompa();
+    assert!(r.effimeri.get(&c).is_none_or(Vec::is_empty));
+}
+
+#[test]
+fn host_con_epoca_enorme_ignorato() {
+    let (mut r, a, b, c) = tavolo_tipico(Variante::Vanilla);
+    let m = Messaggio::Host {
+        epoca: u64::MAX,
+        n: 0,
+    };
+    r.coda.push_back((b, a, m.codifica()));
+    r.coda.push_back((b, c, m.codifica()));
+    r.pompa();
+    assert!(r.nodo(a).e_host(), "a stays host");
+    assert_eq!(r.nodo(c).host().map(String::as_str), Some("a"));
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+
+/// Changes one random leaf of a JSON value (numbers get extreme or seat-like values).
+fn muta(v: &mut serde_json::Value, rng: &mut bazzica_core::Mulberry32) {
+    use serde_json::Value;
+    let figli = match v {
+        Value::Array(a) if !a.is_empty() => a.len(),
+        Value::Object(o) if !o.is_empty() => o.len(),
+        _ => 0,
+    };
+    if figli == 0 {
+        *v = match rng.next_u32() % 8 {
+            0 => Value::from(255),
+            1 => Value::from(9),
+            2 => Value::from(u64::MAX),
+            3 => Value::from(-1),
+            4 => Value::from("?"),
+            5 => Value::Bool(rng.next_u32() % 2 == 0),
+            6 => Value::Array(vec![]),
+            _ => Value::from(rng.next_u32() % 50),
+        };
+        return;
+    }
+    let i = rng.next_u32() as usize % figli;
+    match v {
+        Value::Array(a) => muta(&mut a[i], rng),
+        Value::Object(o) => {
+            let k = o.keys().nth(i).unwrap().clone();
+            muta(o.get_mut(&k).unwrap(), rng);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn messaggi_mutati_non_fanno_danni() {
+    let (mut r, a, b, c) = tavolo_tipico(Variante::Vanilla);
+    let x = r.unisci("x");
+    r.gioca_fino(30);
+    let mut veri: Vec<serde_json::Value> = r
+        .inviati
+        .iter()
+        .map(|(_, _, m)| serde_json::to_value(m).unwrap())
+        .collect();
+    // kinds a normal game may not have sent yet
+    for m in [
+        Messaggio::Effimero(Effimero::Striscia { seat: 1, verso: 0 }),
+        Messaggio::Effimero(Effimero::Frase { seat: 0, indice: 1 }),
+        Messaggio::Host { epoca: 1, n: 3 },
+        Messaggio::Allineato {
+            epoca: 1,
+            n: 3,
+            impronta: "x".into(),
+        },
+        Messaggio::Presenti {
+            ids: ["a".to_string()].into(),
+        },
+    ] {
+        veri.push(serde_json::to_value(m).unwrap());
+    }
+    let mut per_tipo: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    for v in veri {
+        let tipo = format!(
+            "{}{}",
+            v["msg"],
+            v.get("effetto").map_or(String::new(), |e| e.to_string())
+        );
+        per_tipo.entry(tipo).or_default().push(v);
+    }
+    let tipi: Vec<Vec<serde_json::Value>> = per_tipo.into_values().collect();
+    let mut rng = bazzica_core::Mulberry32::new(2026);
+    let mut consegnati = 0;
+    for _ in 0..1_000_000 {
+        if consegnati == 10_000 {
+            break;
+        }
+        // a kind of message first, so rare kinds get mutated as often as entries
+        let tipo = &tipi[rng.next_u32() as usize % tipi.len()];
+        let mut v = tipo[rng.next_u32() as usize % tipo.len()].clone();
+        for _ in 0..1 + rng.next_u32() % 3 {
+            muta(&mut v, &mut rng);
+        }
+        let Ok(m) = serde_json::from_value::<Messaggio>(v) else {
+            continue;
+        };
+        // x, a participant, attacks c only; a and b are honest
+        consegnati += 1;
+        r.coda.push_back((x, c, m.codifica()));
+        r.consegna_uno();
+        r.coda.retain(|(da, _, _)| *da != c);
+        let _ = r.nodi.get_mut(&c).unwrap().uscite();
+        // what the UI does with the replica must not panic either
+        if let Some(st) = r.nodo(c).tavolo().and_then(|t| t.partita.as_ref()) {
+            for s in 0..4 {
+                let _ = st.observation(s);
+                let _ = st.legal_actions(s);
+            }
+        }
+    }
+    assert_eq!(consegnati, 10_000, "mutated messages delivered");
+    r.pompa();
+    let onesti: BTreeSet<_> = [a, b]
+        .iter()
+        .map(|h| (r.tavolo(*h).n, r.tavolo(*h).impronta()))
+        .collect();
+    assert_eq!(onesti.len(), 1, "honest peers diverged");
+}
