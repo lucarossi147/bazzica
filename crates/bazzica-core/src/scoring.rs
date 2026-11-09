@@ -262,6 +262,114 @@ pub fn riepilogo_mano(prese: &[Vec<Entrata>; 2], rules: &RulesConfig) -> Riepilo
     }
 }
 
+/// How a summary row is drawn: plain, indented detail, subtotal or total.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Peso {
+    Voce,
+    Dettaglio,
+    Subtotale,
+    Totale,
+}
+
+/// One row of the end-of-hand table, already worded (same rows as the old web client).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Riga {
+    pub nome: &'static str,
+    pub valori: [String; 2],
+    pub peso: Peso,
+}
+
+/// Reads one origin's count out of the Scope breakdown.
+type ContaScope = fn(&ScopeDettaglio) -> u32;
+
+impl Riepilogo {
+    /// The end-of-hand table: deck points with the point each earned, the Scope split by
+    /// origin, then the extras that happened, and the totals.
+    pub fn righe(&self) -> Vec<Riga> {
+        let [a, b] = &self.squadre;
+        let riga = |nome, peso, f: &dyn Fn(&RiepilogoSquadra, usize) -> String| Riga {
+            nome,
+            valori: [f(a, 0), f(b, 1)],
+            peso,
+        };
+        let con_punto = |v: String, p: i32| if p > 0 { format!("{v} +{p}") } else { v };
+        let punto = |p: i32| {
+            if p > 0 {
+                format!("+{p}")
+            } else {
+                String::new()
+            }
+        };
+        let mut righe = vec![
+            riga("Carte", Peso::Voce, &|s, _| {
+                con_punto(s.carte.to_string(), s.punti_mazzo_dettaglio.carte)
+            }),
+            riga("Denari", Peso::Voce, &|s, _| {
+                con_punto(s.denari.to_string(), s.punti_mazzo_dettaglio.denari)
+            }),
+            riga("Primiera", Peso::Voce, &|s, _| {
+                let v = if s.semi_mancanti.is_empty() {
+                    s.primiera.to_string()
+                } else {
+                    "incompleta".into()
+                };
+                con_punto(v, s.punti_mazzo_dettaglio.primiera)
+            }),
+            riga("7 bello", Peso::Voce, &|s, _| {
+                punto(s.punti_mazzo_dettaglio.sette_bello)
+            }),
+            riga("Re bello", Peso::Voce, &|s, _| {
+                punto(s.punti_mazzo_dettaglio.re_bello)
+            }),
+            riga("Punti di mazzo", Peso::Subtotale, &|s, _| {
+                s.punti_mazzo.to_string()
+            }),
+            riga("Scope", Peso::Subtotale, &|s, _| s.scope.to_string()),
+        ];
+        let origini: [(&str, ContaScope); 5] = [
+            ("di sparecchio", |d| d.sparecchio),
+            ("da Bazzica", |d| d.bazzica),
+            ("Piccole", |d| d.piccola),
+            ("Grandi", |d| d.grande),
+            ("Assi", |d| d.asso),
+        ];
+        for (nome, f) in origini {
+            if self.squadre.iter().any(|s| f(&s.scope_dettaglio) > 0) {
+                righe.push(riga(nome, Peso::Dettaglio, &|s, _| {
+                    f(&s.scope_dettaglio).to_string()
+                }));
+            }
+        }
+        if self.squadre.iter().any(|s| s.due_denari) {
+            righe.push(riga("2 di denari", Peso::Voce, &|s, _| {
+                if s.due_denari {
+                    s.punti_due_denari.to_string()
+                } else {
+                    String::new()
+                }
+            }));
+        }
+        if self.squadre.iter().any(|s| s.napola > 0) {
+            righe.push(riga("Napola", Peso::Voce, &|s, _| match &s.napola_nome {
+                Some(n) if s.napola > 0 => format!("{n}: +{}", s.napola),
+                _ => String::new(),
+            }));
+        }
+        if self.credito_perso.iter().any(|c| *c > 0) {
+            righe.push(riga("Credito perso", Peso::Dettaglio, &|_, t| {
+                self.credito_perso[t].to_string()
+            }));
+        }
+        righe.push(riga("Totale mano", Peso::Totale, &|s, _| {
+            s.totale.to_string()
+        }));
+        righe.push(riga("Partita", Peso::Totale, &|_, t| {
+            self.punteggi[t].to_string()
+        }));
+        righe
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +393,60 @@ mod tests {
         assert_eq!(manc, [Seme::Spade, Seme::Bastoni]);
         assert_eq!(napola(&carte), 3);
         assert_eq!(napola(&carte[1..]), 0);
+    }
+
+    fn prese(codici: &[&str], su: &[(usize, Origine)]) -> Vec<Entrata> {
+        let mut v: Vec<Entrata> = codici
+            .iter()
+            .map(|c| Entrata::coperta(Card::from_codice(c).unwrap()))
+            .collect();
+        for (i, o) in su {
+            v[*i].gira(*o);
+        }
+        v
+    }
+
+    #[test]
+    fn righe_del_riepilogo() {
+        let regole = RulesConfig::preset(crate::Variante::Avogadro, false);
+        let a = prese(
+            &[
+                "denari_01",
+                "denari_02",
+                "denari_03",
+                "denari_07",
+                "coppe_05",
+            ],
+            &[(0, Origine::Asso), (4, Origine::Sparecchio)],
+        );
+        let b = prese(&["spade_10", "bastoni_09"], &[(0, Origine::Bazzica)]);
+        let mut r = riepilogo_mano(&[a, b], &regole);
+        r.credito_perso = [0, 2];
+        r.punteggi = [9, 1];
+        let righe = r.righe();
+        let trova = |n: &str| righe.iter().find(|r| r.nome == n).cloned();
+        assert_eq!(
+            trova("Denari").unwrap().valori,
+            ["4".to_string(), "0".into()]
+        );
+        assert_eq!(
+            trova("7 bello").unwrap().valori,
+            ["+1".to_string(), "".into()]
+        );
+        assert_eq!(trova("Primiera").unwrap().valori[1], "incompleta");
+        // Fermi: -5 plus the one deck point (7 bello)
+        assert_eq!(trova("2 di denari").unwrap().valori[0], "-4");
+        assert_eq!(trova("Napola").unwrap().valori[0], "Napola al 3: +3");
+        assert_eq!(trova("Assi").unwrap().valori, ["1".to_string(), "0".into()]);
+        assert_eq!(trova("da Bazzica").unwrap().peso, Peso::Dettaglio);
+        assert_eq!(trova("Credito perso").unwrap().valori[1], "2");
+        assert!(trova("Piccole").is_none() && trova("Grandi").is_none());
+        let fine = &righe[righe.len() - 2..];
+        assert_eq!(
+            fine[0].valori,
+            [r.totali[0].to_string(), r.totali[1].to_string()]
+        );
+        assert_eq!(fine[1].valori, ["9".to_string(), "1".into()]);
+        assert!(fine.iter().all(|r| r.peso == Peso::Totale));
     }
 }
