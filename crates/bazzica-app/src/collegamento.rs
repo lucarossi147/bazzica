@@ -99,7 +99,7 @@ pub fn passi(f: &Fatti) -> Vec<Passo> {
     } else if f.con_turn {
         passo(
             Fallito,
-            "Non riesco a collegarmi nemmeno con il server TURN: controlla i suoi dati, o provate sulla stessa Wi-Fi",
+            "Non riesco a collegarmi: chi ha creato il tavolo tenga l'app aperta in primo piano, poi premi Riprova. Se non basta, provate sulla stessa Wi-Fi o controllate il server TURN",
         )
     } else {
         passo(
@@ -312,7 +312,7 @@ mod tests {
         assert!(serve_turn(&f));
         assert!(ultimo(&f).testo.contains("server TURN qui sotto"));
         f.con_turn = true;
-        assert!(ultimo(&f).testo.contains("nemmeno con il server TURN"));
+        assert!(ultimo(&f).testo.contains("tenga l'app aperta"));
         f.peer_collegati = 1;
         assert_eq!(ultimo(&f).esito, Esito::Fatto);
         assert!(!serve_turn(&f));
