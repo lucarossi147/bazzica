@@ -88,6 +88,11 @@ impl Sessione {
         &self.nodo
     }
 
+    /// Takes the table back from another tab of the same identity; reopen the socket next.
+    pub fn riprendi(&mut self, ora: u64) {
+        self.nodo.riprendi(ora);
+    }
+
     /// Processes the network and the clock; returns what the UI must react to.
     pub fn aggiorna(&mut self, ora: u64) -> Vec<Uscita<PeerId>> {
         if let Ok(cambi) = self.socket.try_update_peers() {
