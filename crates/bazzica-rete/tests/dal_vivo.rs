@@ -135,7 +135,7 @@ fn quattro_peer_su_nostr_e_webrtc() {
 }
 
 /// A player joining a table that already exists (its host has been alone in the room for a
-/// while) gets the replica.
+/// while; `ATTESA=<seconds>` changes how long, default 15) gets the replica.
 #[test]
 #[ignore]
 fn entra_in_un_tavolo_gia_creato() {
@@ -153,13 +153,24 @@ fn entra_in_un_tavolo_gia_creato() {
         s
     };
     let mut host = apri(Nodo::crea(io("a"), Impostazioni::default(), 1, config()));
-    while inizio.elapsed() < Duration::from_secs(15) {
+    while inizio.elapsed()
+        < Duration::from_secs(
+            std::env::var("ATTESA")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(15),
+        )
+    {
         host.aggiorna(ora());
         std::thread::sleep(Duration::from_millis(20));
     }
     let mut ospite = apri(Nodo::unisciti(io("b"), 2, config()));
     let t0 = Instant::now();
-    while !ospite.nodo().tavolo().is_some_and(|t| t.partecipanti.len() == 2) {
+    while !ospite
+        .nodo()
+        .tavolo()
+        .is_some_and(|t| t.partecipanti.len() == 2)
+    {
         assert!(
             t0.elapsed() < Duration::from_secs(30),
             "timeout: host {:?}, guest {:?}",

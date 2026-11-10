@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/bazzica-core", "crates/bazzica-net", "crates/bazzica-rete", "crates/bazzica-app"]
+exclude = ["vendor/matchbox_socket"]
 
 [workspace.package]
 edition = "2024"
@@ -17,3 +18,8 @@ bazzica-core = { path = "crates/bazzica-core" }
 # The trace conformance suite replays ~35k game steps; keep tests fast without a release build.
 [profile.test]
 opt-level = 2
+
+# matchbox_socket 0.15.0 with one fix: browsers may take ~40 s to finish ICE gathering, and
+# matchbox sent no offer until then. See vendor/matchbox_socket/PATCH.md.
+[patch.crates-io]
+matchbox_socket = { path = "vendor/matchbox_socket" }
