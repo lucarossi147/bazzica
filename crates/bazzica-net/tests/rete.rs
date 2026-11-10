@@ -9,17 +9,26 @@ use bazzica_net::*;
 type H = u32;
 type Filtro = fn(&Messaggio) -> bool;
 
-/// Full-mesh test network. Messages go through the JSON codec and are delivered in order.
+/// Test network. Messages go through the JSON codec and are delivered in order, only along
+/// links (a full mesh unless built otherwise with [`Rete::entra_con`] / [`Rete::scollega_coppia`]).
 struct Rete {
     nodi: BTreeMap<H, Nodo<H>>,
     prossimo: H,
+    /// Open links, as `(lower, higher)` handle pairs.
+    collegamenti: BTreeSet<(H, H)>,
     coda: VecDeque<(H, H, Vec<u8>)>,
     ora: u64,
     rifiuti: BTreeMap<H, Vec<String>>,
     voci: Vec<Voce>,
     effimeri: BTreeMap<H, Vec<(IdGiocatore, Effimero)>>,
-    /// Drop the next message matching (to, predicate).
-    da_perdere: Vec<(H, Filtro)>,
+    /// Drop the next message matching (from, if given; to; predicate).
+    da_perdere: Vec<(Option<H>, H, Filtro)>,
+    /// Every message sent so far, for counting (from, to, message).
+    inviati: Vec<(H, H, Messaggio)>,
+}
+
+fn coppia(a: H, b: H) -> (H, H) {
+    (a.min(b), a.max(b))
 }
 
 fn io(id: &str) -> Partecipante {
@@ -49,21 +58,68 @@ impl Rete {
             voci: vec![],
             effimeri: BTreeMap::new(),
             da_perdere: vec![],
+            inviati: vec![],
+            collegamenti: BTreeSet::new(),
         }
     }
 
     /// Adds a node and connects it to everyone already on the network.
     fn entra(&mut self, nodo: Nodo<H>) -> H {
+        self.entra_con(nodo, None)
+    }
+
+    /// Adds a node connected to `con` only (everyone when `None`).
+    fn entra_con(&mut self, nodo: Nodo<H>, con: Option<&[H]>) -> H {
         let h = self.prossimo;
         self.prossimo += 1;
-        let altri: Vec<H> = self.nodi.keys().copied().collect();
+        let altri: Vec<H> = match con {
+            Some(c) => c.to_vec(),
+            None => self.nodi.keys().copied().collect(),
+        };
         self.nodi.insert(h, nodo);
         for a in altri {
-            self.nodi.get_mut(&a).unwrap().connesso(self.ora, h);
-            self.nodi.get_mut(&h).unwrap().connesso(self.ora, a);
+            self.collega_senza_pompare(a, h);
         }
         self.pompa();
         h
+    }
+
+    fn collega_senza_pompare(&mut self, a: H, b: H) {
+        if self.collegamenti.insert(coppia(a, b)) {
+            self.nodi.get_mut(&a).unwrap().connesso(self.ora, b);
+            self.nodi.get_mut(&b).unwrap().connesso(self.ora, a);
+        }
+    }
+
+    /// Opens the link a–b (both nodes see a new connection).
+    fn collega(&mut self, a: H, b: H) {
+        self.collega_senza_pompare(a, b);
+        self.pompa();
+    }
+
+    /// Cuts the link a–b only (partial mesh); queued messages on it are lost.
+    fn scollega_coppia(&mut self, a: H, b: H) {
+        if !self.collegamenti.remove(&coppia(a, b)) {
+            return;
+        }
+        self.coda.retain(|(x, y, _)| coppia(*x, *y) != coppia(a, b));
+        self.nodi.get_mut(&a).unwrap().disconnesso(self.ora, &b);
+        self.nodi.get_mut(&b).unwrap().disconnesso(self.ora, &a);
+        self.pompa();
+    }
+
+    fn collegati(&self, a: H, b: H) -> bool {
+        self.collegamenti.contains(&coppia(a, b))
+    }
+
+    /// Drops the next message from `da` to `a` that matches `filtro`.
+    fn perdi(&mut self, da: H, a: H, filtro: Filtro) {
+        self.da_perdere.push((Some(da), a, filtro));
+    }
+
+    /// Drops the next message to `a`, from anyone, that matches `filtro`.
+    fn perdi_verso(&mut self, a: H, filtro: Filtro) {
+        self.da_perdere.push((None, a, filtro));
     }
 
     fn crea(&mut self, id: &str, imp: Impostazioni) -> H {
@@ -75,11 +131,22 @@ impl Rete {
         self.entra(Nodo::unisciti(io(id), seme, config()))
     }
 
+    /// Removes `h` and its links; returns the handles it was linked to.
+    fn stacca(&mut self, h: H) -> Vec<H> {
+        let vicini: Vec<H> = self
+            .collegamenti
+            .iter()
+            .filter_map(|&(x, y)| (x == h).then_some(y).or((y == h).then_some(x)))
+            .collect();
+        self.collegamenti.retain(|&(x, y)| x != h && y != h);
+        self.coda.retain(|(a, b, _)| *a != h && *b != h);
+        vicini
+    }
+
     fn esci(&mut self, h: H) {
         self.nodi.remove(&h);
-        self.coda.retain(|(a, b, _)| *a != h && *b != h);
-        for n in self.nodi.values_mut() {
-            n.disconnesso(self.ora, &h);
+        for v in self.stacca(h) {
+            self.nodi.get_mut(&v).unwrap().disconnesso(self.ora, &h);
         }
         self.pompa();
     }
@@ -87,10 +154,9 @@ impl Rete {
     /// Cuts every connection of `h` (like a phone going to sleep) and hands back its node.
     fn isola(&mut self, h: H) -> Nodo<H> {
         let mut n = self.nodi.remove(&h).unwrap();
-        self.coda.retain(|(a, b, _)| *a != h && *b != h);
-        for (k, o) in self.nodi.iter_mut() {
-            o.disconnesso(self.ora, &h);
-            n.disconnesso(self.ora, k);
+        for v in self.stacca(h) {
+            self.nodi.get_mut(&v).unwrap().disconnesso(self.ora, &h);
+            n.disconnesso(self.ora, &v);
         }
         let _ = n.uscite();
         self.pompa();
@@ -111,56 +177,92 @@ impl Rete {
         self.pompa();
     }
 
-    /// Delivers everything until the network is quiet.
-    fn pompa(&mut self) {
-        loop {
-            let mut mosso = false;
-            let handles: Vec<H> = self.nodi.keys().copied().collect();
-            for h in handles {
-                for u in self.nodi.get_mut(&h).unwrap().uscite() {
-                    mosso = true;
-                    match u {
-                        Uscita::Invia { a, msg } => {
-                            let dest: Vec<H> = match a {
-                                Destinatario::Tutti => {
-                                    self.nodi.keys().copied().filter(|x| *x != h).collect()
-                                }
-                                Destinatario::Uno(p) => vec![p],
-                            };
-                            for d in dest {
-                                if let Some(i) =
-                                    self.da_perdere.iter().position(|(t, f)| *t == d && f(&msg))
-                                {
-                                    self.da_perdere.remove(i);
-                                    continue;
-                                }
-                                self.coda.push_back((h, d, msg.codifica()));
-                            }
-                        }
-                        Uscita::Rifiutata { motivo } => {
-                            self.rifiuti.entry(h).or_default().push(motivo)
-                        }
-                        Uscita::Applicata { voce, .. } if self.nodi[&h].e_host() => {
-                            self.voci.push(voce)
-                        }
-                        Uscita::Effimero { da, effetto } => {
-                            self.effimeri.entry(h).or_default().push((da, effetto))
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            if let Some((da, a, b)) = self.coda.pop_front() {
+    /// Moves every node's output to the wire queue (or the test's records). True if any.
+    fn raccogli(&mut self) -> bool {
+        let mut mosso = false;
+        let handles: Vec<H> = self.nodi.keys().copied().collect();
+        for h in handles {
+            for u in self.nodi.get_mut(&h).unwrap().uscite() {
                 mosso = true;
-                let msg = Messaggio::decodifica(&b).expect("wire round-trip");
-                if let Some(n) = self.nodi.get_mut(&a) {
-                    n.ricevi(self.ora, da, msg);
+                match u {
+                    Uscita::Invia { a, msg } => {
+                        let dest: Vec<H> = match a {
+                            Destinatario::Tutti => self
+                                .nodi
+                                .keys()
+                                .copied()
+                                .filter(|x| *x != h && self.collegati(h, *x))
+                                .collect(),
+                            // like matchbox: a packet for a peer we are not linked to is dropped
+                            Destinatario::Uno(p) => {
+                                self.collegati(h, p).then_some(p).into_iter().collect()
+                            }
+                        };
+                        for d in dest {
+                            if let Some(i) = self.da_perdere.iter().position(|(s, t, f)| {
+                                s.is_none_or(|s| s == h) && *t == d && f(&msg)
+                            }) {
+                                self.da_perdere.remove(i);
+                                continue;
+                            }
+                            self.inviati.push((h, d, msg.clone()));
+                            self.coda.push_back((h, d, msg.codifica()));
+                        }
+                    }
+                    Uscita::Rifiutata { motivo } => self.rifiuti.entry(h).or_default().push(motivo),
+                    Uscita::Applicata { voce, .. } if self.nodi[&h].e_host() => {
+                        self.voci.push(voce)
+                    }
+                    Uscita::Effimero { da, effetto } => {
+                        self.effimeri.entry(h).or_default().push((da, effetto))
+                    }
+                    _ => {}
                 }
-            }
-            if !mosso {
-                break;
             }
         }
+        mosso
+    }
+
+    /// Collects pending output, then delivers exactly one queued message. False if none.
+    fn consegna_uno(&mut self) -> bool {
+        self.raccogli();
+        let Some((da, a, b)) = self.coda.pop_front() else {
+            return false;
+        };
+        let msg = Messaggio::decodifica(&b).expect("wire round-trip");
+        if let Some(n) = self.nodi.get_mut(&a) {
+            n.ricevi(self.ora, da, msg);
+        }
+        true
+    }
+
+    /// Delivers everything until the network is quiet, then checks the invariants.
+    fn pompa(&mut self) {
+        while self.raccogli() | self.consegna_uno() {}
+        self.verifica_invarianti();
+    }
+
+    /// I1 on every node, and I2: no two nodes host the same epoch.
+    fn verifica_invarianti(&self) {
+        for n in self.nodi.values() {
+            n.verifica_invarianti().unwrap();
+        }
+        let mut regie = BTreeSet::new();
+        for n in self.nodi.values().filter(|n| n.e_host()) {
+            assert!(
+                regie.insert(n.epoca()),
+                "I2: two hosts at epoch {}",
+                n.epoca()
+            );
+        }
+    }
+
+    /// Advances the clock by `ms` and ticks `h` alone, delivering nothing (its output stays
+    /// queued in the node until the next `pompa`).
+    fn tick_solo(&mut self, h: H, ms: u64) {
+        self.ora += ms;
+        let ora = self.ora;
+        self.nodi.get_mut(&h).unwrap().tick(ora);
     }
 
     /// Advances the clock to the next scheduled wake-up (or by `max` ms) and ticks everyone.
@@ -528,10 +630,8 @@ fn versione_diversa_viene_segnalata() {
 fn messaggio_perso_si_recupera() {
     let (mut r, _, b, c) = tavolo_tipico(Variante::Vanilla);
     r.gioca_fino(30);
-    r.da_perdere
-        .push((c, |m| matches!(m, Messaggio::Voce { .. })));
-    r.da_perdere
-        .push((b, |m| matches!(m, Messaggio::Voce { .. })));
+    r.perdi_verso(c, |m| matches!(m, Messaggio::Voce { .. }));
+    r.perdi_verso(b, |m| matches!(m, Messaggio::Voce { .. }));
     r.gioca_fino(60);
     r.assert_sincronizzati();
     assert!(r.da_perdere.is_empty());
@@ -632,8 +732,7 @@ fn nuovo_host_in_ritardo_recupera_da_chi_e_avanti() {
     let (mut r, a, b, c) = tavolo_tipico(Variante::Vanilla);
     r.gioca_fino(30);
     // b misses the last entry from a, then a leaves before b catches up
-    r.da_perdere
-        .push((b, |m| matches!(m, Messaggio::Voce { .. })));
+    r.perdi_verso(b, |m| matches!(m, Messaggio::Voce { .. }));
     r.richiedi(c, Richiesta::Prosegui); // harmless no-op request to keep traffic flowing
     r.gioca_fino(31);
     let n_c = r.tavolo(c).n;
@@ -772,4 +871,43 @@ fn rimasto_solo_poi_qualcuno_rientra() {
     r.assert_sincronizzati();
     assert!(r.nodo(c).e_host());
     assert_eq!(r.tavolo(b2).n, n, "b got c's replica");
+}
+
+#[test]
+fn strumenti_della_rete() {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let b = r.entra_con(Nodo::unisciti(io("b"), 2, config()), Some(&[a]));
+    let c = r.entra_con(Nodo::unisciti(io("c"), 3, config()), Some(&[a]));
+    assert!(!r.collegati(b, c), "partial mesh: b and c only reach a");
+    r.assert_sincronizzati();
+
+    // a loss on one directed link only: c falls behind, then catches up on the next entry
+    r.perdi(a, c, |m| matches!(m, Messaggio::Voce { .. }));
+    r.richiedi(b, Richiesta::Siedi { posto: 0 });
+    assert_eq!(r.tavolo(c).n + 1, r.tavolo(b).n);
+    r.richiedi(b, Richiesta::Siedi { posto: 1 });
+    r.assert_sincronizzati();
+
+    // one message at a time: b's request reaches a, a's entry is still on the wire
+    let (n, ora) = (r.tavolo(a).n, r.ora);
+    r.nodi
+        .get_mut(&b)
+        .unwrap()
+        .richiedi(ora, Richiesta::Siedi { posto: 2 });
+    assert!(r.consegna_uno());
+    assert_eq!((r.tavolo(a).n, r.tavolo(b).n), (n + 1, n));
+    r.pompa();
+    r.assert_sincronizzati();
+
+    // a node ticks alone: nothing is delivered
+    r.tick_solo(a, 5);
+    assert!(r.coda.is_empty() && !r.consegna_uno());
+
+    // cutting and reopening one link
+    r.scollega_coppia(a, b);
+    assert!(r.nodo(b).host().is_none(), "b reaches nobody");
+    r.collega(a, b);
+    r.assert_sincronizzati();
+    assert!(r.inviati.iter().any(|(_, d, _)| *d == c));
 }
