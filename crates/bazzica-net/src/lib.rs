@@ -12,7 +12,7 @@ pub mod protocollo;
 pub mod tavolo;
 
 pub use nodo::{Config, Destinatario, Nodo, Uscita};
-pub use protocollo::{Effimero, Messaggio, Richiesta, VERSIONE_PROTOCOLLO};
+pub use protocollo::{Effimero, Messaggio, Regia, Richiesta, Sessione, VERSIONE_PROTOCOLLO};
 pub use tavolo::{
     Errore, IdGiocatore, Impostazioni, Partecipante, Posto, Ritmo, StatoTavolo, Tavolo, TipoTimer,
     Voce,

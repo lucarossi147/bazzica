@@ -8,7 +8,26 @@ use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, Voce};
 /// Bumped on any incompatible change to the messages or to the replicated state.
 ///
 /// - 3: `Allineato`, the answer to a `Host` claim (sync barrier of a new host).
-pub const VERSIONE_PROTOCOLLO: u32 = 3;
+/// - 4: [`Sessione`] in `Ciao`, the host's [`Regia`] in `Istantanea`, `Sostituito`.
+pub const VERSIONE_PROTOCOLLO: u32 = 4;
+
+/// One run of the app (a page load) for an identity. When two runs of the same identity are
+/// connected (two tabs, a reload before the old link timed out), the newer one wins: later
+/// `nata` (ms on the device's clock, which same-device tabs share), then the larger `nonce`.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct Sessione {
+    pub nata: u64,
+    pub nonce: u64,
+}
+
+/// Who hosts: a participant in one of its sessions (another tab of the same id is not host).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Regia {
+    pub id: IdGiocatore,
+    pub sessione: Sessione,
+}
 
 /// What a player asks the host to do. The host checks permissions and turns it into a [`Voce`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +60,7 @@ pub enum Messaggio {
     Ciao {
         versione: u32,
         io: Partecipante,
+        sessione: Sessione,
         /// Whether the sender already holds a replica of the table.
         replica: bool,
     },
@@ -64,7 +84,7 @@ pub enum Messaggio {
     /// The whole replica, sent to newcomers, to peers that fell behind and on resync.
     Istantanea {
         epoca: u64,
-        host: IdGiocatore,
+        host: Regia,
         tavolo: Box<Tavolo>,
     },
     /// "I am the host now" (after the previous host left). `n` is the claimer's log length.
@@ -85,6 +105,8 @@ pub enum Messaggio {
         impronta: String,
     },
     Effimero(Effimero),
+    /// "A newer session of your identity is here": the receiver stops acting.
+    Sostituito,
 }
 
 impl Messaggio {
