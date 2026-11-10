@@ -8,6 +8,7 @@ use std::sync::Arc;
 use bazzica_net::{Destinatario, Effimero, Errore, Messaggio, Nodo, Richiesta, Uscita};
 use matchbox_socket::{MessageLoopFuture, PeerId, PeerState, WebRtcSocket};
 
+use crate::frammenti::{self, Ricompositore};
 use crate::ice::{Diagnosi, DiagnosiCondivisa, Turn, leggi, server_ice};
 use crate::segnalatore::{NostrSignallerBuilder, NotizieCondivise};
 
@@ -22,6 +23,9 @@ pub struct Sessione {
     notizie: NotizieCondivise,
     /// Replaced sockets saying goodbye, dropped at the given time.
     congedi: Vec<(WebRtcSocket, u64)>,
+    ricompositore: Ricompositore<PeerId>,
+    /// Id of the last message sent in fragments.
+    id_frammenti: u32,
 }
 
 impl Sessione {
@@ -43,6 +47,8 @@ impl Sessione {
                 diagnosi,
                 notizie,
                 congedi: vec![],
+                ricompositore: Ricompositore::default(),
+                id_frammenti: 0,
             },
             ciclo,
         )
@@ -126,13 +132,17 @@ impl Sessione {
                 if aperto {
                     self.nodo.connesso(ora, p);
                 } else {
+                    self.ricompositore.dimentica(&p);
                     self.nodo.disconnesso(ora, &p);
                 }
             }
         }
         if let Ok(canale) = self.socket.get_channel_mut(0) {
             for (p, pacchetto) in canale.receive() {
-                match Messaggio::decodifica(&pacchetto) {
+                let Some(intero) = self.ricompositore.ricevi(&p, &pacchetto) else {
+                    continue; // a fragment of a message still arriving
+                };
+                match Messaggio::decodifica(&intero) {
                     Some(m) => self.nodo.ricevi(ora, p, m),
                     None => log::warn!("messaggio non valido da {p}"),
                 }
@@ -159,17 +169,23 @@ impl Sessione {
         for u in self.nodo.uscite() {
             match u {
                 Uscita::Invia { a, msg } => {
-                    let pacchetto: matchbox_socket::Packet = msg.codifica().into();
+                    self.id_frammenti = self.id_frammenti.wrapping_add(1);
+                    let pacchetti: Vec<matchbox_socket::Packet> =
+                        frammenti::spezza(&msg.codifica(), self.id_frammenti)
+                            .into_iter()
+                            .map(Into::into)
+                            .collect();
                     let Ok(canale) = self.socket.get_channel_mut(0) else {
                         continue;
                     };
-                    match a {
-                        Destinatario::Tutti => {
-                            for p in &connessi {
-                                canale.send(pacchetto.clone(), *p);
-                            }
+                    let destinatari = match a {
+                        Destinatario::Tutti => connessi.clone(),
+                        Destinatario::Uno(p) => vec![p],
+                    };
+                    for p in destinatari {
+                        for pacchetto in &pacchetti {
+                            canale.send(pacchetto.clone(), p);
                         }
-                        Destinatario::Uno(p) => canale.send(pacchetto, p),
                     }
                 }
                 altro => resto.push(altro),

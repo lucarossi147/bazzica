@@ -60,6 +60,13 @@ pub struct Impostazioni {
     /// How long bots "think" before playing.
     #[serde(default)]
     pub ritmo: Ritmo,
+    /// Seconds the end-of-hand summary waits for the players; 0 waits forever.
+    #[serde(default = "trenta")]
+    pub timer_fine_mano: u32,
+}
+
+fn trenta() -> u32 {
+    30
 }
 
 /// Bot pace: a factor on the node's base bot delay, so everyone can follow the plays.
@@ -108,6 +115,7 @@ impl Default for Impostazioni {
             timer_giocata: 15,
             squadre: NOMI_SQUADRE.map(String::from),
             ritmo: Ritmo::default(),
+            timer_fine_mano: trenta(),
         }
     }
 }
@@ -118,6 +126,7 @@ impl Impostazioni {
         self.nome = taglia(&self.nome, 40, "Tavolo");
         self.timer_scambio = self.timer_scambio.min(MAX_TIMER);
         self.timer_giocata = self.timer_giocata.min(MAX_TIMER);
+        self.timer_fine_mano = self.timer_fine_mano.min(MAX_TIMER);
         for (i, s) in self.squadre.iter_mut().enumerate() {
             *s = taglia(s, 20, NOMI_SQUADRE[i]);
         }
@@ -148,6 +157,8 @@ pub enum StatoTavolo {
 pub enum TipoTimer {
     Scambio,
     Giocata,
+    /// The end-of-hand summary: on expiry everyone counts as having acknowledged.
+    FineMano,
 }
 
 /// One entry of the replicated log. Only the sequencer (host) creates entries; it has already
@@ -187,6 +198,15 @@ pub enum Voce {
     Termina {
         da: IdGiocatore,
     },
+    /// A bot takes the seat of a human who left during the game.
+    Sostituisci {
+        posto: Seat,
+    },
+    /// The human whose seat a bot took is back and plays it again.
+    Riprendi {
+        posto: Seat,
+        id: IdGiocatore,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,6 +235,9 @@ pub struct Tavolo {
     /// Humans who acknowledged the current end-of-hand summary.
     pub ack: BTreeSet<IdGiocatore>,
     pub terminata_da: Option<IdGiocatore>,
+    /// For each seat a bot took over during the game: whose it was.
+    #[serde(default)]
+    pub sostituiti: [Option<IdGiocatore>; 4],
     /// Number of log entries applied so far.
     pub n: u64,
 }
@@ -229,6 +252,7 @@ impl Tavolo {
             partita: None,
             ack: BTreeSet::new(),
             terminata_da: None,
+            sostituiti: Default::default(),
             n: 0,
         }
     }
@@ -380,6 +404,7 @@ impl Tavolo {
                 self.stato = StatoTavolo::InCorso;
                 self.ack.clear();
                 self.terminata_da = None;
+                self.sostituiti = Default::default();
                 Ok(eventi)
             }
             Voce::Azione(a) => {
@@ -387,6 +412,36 @@ impl Tavolo {
                 let eventi = st.apply(a).map_err(|e| Errore(e.0))?;
                 self.dopo_azione();
                 Ok(eventi)
+            }
+            Voce::Scaduto {
+                timer: TipoTimer::FineMano,
+                ..
+            } => {
+                if self.partita_mut()?.fase != Fase::FineMano {
+                    return errore("Non è la fine di una mano");
+                }
+                self.ack = self.umani();
+                Ok(vec![])
+            }
+            Voce::Sostituisci { posto } => {
+                self.partita_mut()?;
+                let p = self.posto_mut(*posto)?;
+                let Some(Posto::Umano { id }) = p.take() else {
+                    return errore("Nessun giocatore da sostituire");
+                };
+                *p = Some(Posto::Bot);
+                self.sostituiti[usize::from(*posto)] = Some(id);
+                Ok(vec![])
+            }
+            Voce::Riprendi { posto, id } => {
+                self.partita_mut()?;
+                let i = usize::from(*posto);
+                if self.sostituiti.get(i) != Some(&Some(id.clone())) || !self.e_bot(*posto) {
+                    return errore("Questo posto non era tuo");
+                }
+                self.posti[i] = Some(Posto::Umano { id: id.clone() });
+                self.sostituiti[i] = None;
+                Ok(vec![])
             }
             Voce::Scaduto { azioni, .. } => {
                 let st = self.partita_mut()?;
@@ -471,6 +526,19 @@ mod tests {
         });
         assert_eq!(errore, Err(Errore("Giocatore sconosciuto".into())));
         assert_eq!(t, Tavolo::nuovo(io("a"), Impostazioni::default()));
+    }
+
+    #[test]
+    fn impostazioni_senza_timer_fine_mano_aspettano_trenta_secondi() {
+        let mut v = serde_json::to_value(Impostazioni::default()).unwrap();
+        v.as_object_mut().unwrap().remove("timer_fine_mano");
+        let imp: Impostazioni = serde_json::from_value(v).unwrap();
+        assert_eq!(imp.timer_fine_mano, 30);
+        let lungo = Impostazioni {
+            timer_fine_mano: 10_000,
+            ..Impostazioni::default()
+        };
+        assert_eq!(lungo.normalizzate().timer_fine_mano, MAX_TIMER);
     }
 
     #[test]

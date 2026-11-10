@@ -14,7 +14,9 @@ use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, Voce};
 /// - 5: `HoReplica` (fixes stale replica flags), `Presenti` (the host's view, for the
 ///   majority rule of elections).
 /// - 6: `Ricevuta`, the host's acknowledgement of a request.
-pub const VERSIONE_PROTOCOLLO: u32 = 6;
+/// - 7: end-of-hand timer (`TipoTimer::FineMano`, `Impostazioni::timer_fine_mano`), seat
+///   replacement (`Voce::Sostituisci`, `Voce::Riprendi`, `Tavolo::sostituiti`).
+pub const VERSIONE_PROTOCOLLO: u32 = 7;
 
 /// One run of the app (a page load) for an identity. When two runs of the same identity are
 /// connected (two tabs, a reload before the old link timed out), the newer one wins: later
@@ -38,14 +40,29 @@ pub struct Regia {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "richiesta", rename_all = "snake_case")]
 pub enum Richiesta {
-    Siedi { posto: Seat },
-    Alzati { posto: Seat },
-    Bot { posto: Seat, aggiungi: bool },
+    Siedi {
+        posto: Seat,
+    },
+    Alzati {
+        posto: Seat,
+    },
+    Bot {
+        posto: Seat,
+        aggiungi: bool,
+    },
     Imposta(Impostazioni),
     Avvia,
     Azione(Azione),
     Prosegui,
     Termina,
+    /// A bot takes the seat of a human who has been away for a while.
+    Sostituisci {
+        posto: Seat,
+    },
+    /// Take back one's own seat from the bot that replaced us.
+    Riprendi {
+        posto: Seat,
+    },
 }
 
 /// Cosmetic effects that do not change the game: sent straight to everyone, never logged.
