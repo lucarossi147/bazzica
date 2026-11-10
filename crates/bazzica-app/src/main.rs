@@ -9,6 +9,7 @@ mod guida;
 mod home;
 mod partita;
 mod profilo;
+mod riapertura;
 mod stanza;
 
 use std::collections::BTreeSet;
@@ -341,12 +342,16 @@ fn App() -> Element {
     use_future(move || async move {
         let mut nascosto_da: Option<u64> = None;
         let mut ultima_riapertura = 0u64;
+        let mut senza_peer = riapertura::SenzaPeer::default();
         let mut connessi = BTreeSet::new();
         let mut ultimo_tic = 0u64;
         loop {
             futures_timer::Delay::new(Duration::from_millis(50)).await;
             let adesso = ora();
-            if adesso / 250 != *ctx.ora.peek() / 250 {
+            // a hidden page keeps driving the node (the host must keep the game going;
+            // browsers throttle this loop to about once a second), but skips UI-only work
+            let nascosto = documento_nascosto();
+            if !nascosto && adesso / 250 != *ctx.ora.peek() / 250 {
                 let mut o = ctx.ora;
                 o.set(adesso);
             }
@@ -359,20 +364,34 @@ fn App() -> Element {
             let Some(c) = ctx.conn.peek().clone() else {
                 continue;
             };
-            // phones suspend pages: rebuild the connection after a nap or when it died
-            if documento_nascosto() {
+            // rebuild the transport when it is unhealthy, not merely because the page hid
+            let dormito_ms = if nascosto {
                 nascosto_da.get_or_insert(adesso);
-                continue;
-            }
-            let dormito = nascosto_da.take().is_some_and(|t| adesso > t + 3000);
-            if (dormito || *c.caduta.borrow()) && adesso > ultima_riapertura + 5000 {
+                None
+            } else {
+                nascosto_da.take().map(|t| adesso - t)
+            };
+            let senza_peer_dal = {
+                let s = c.sessione.borrow();
+                senza_peer.osserva(adesso, s.peer_collegati(), s.nodo().tavolo().is_some())
+            };
+            let fatti = riapertura::FattiRete {
+                adesso,
+                ultima_riapertura,
+                caduta: c.cicli.borrow().caduta(),
+                dormito_ms,
+                senza_peer_dal,
+            };
+            if riapertura::serve_riaprire(&fatti) {
                 ultima_riapertura = adesso;
+                senza_peer.riaperta();
                 c.riapri();
             }
             let uscite = c.aggiorna();
             ctx.gestisci(&c, uscite);
             // last five seconds of my turn: tick
-            if let Some(rimasti) = secondi_rimasti(&c, ctx, adesso)
+            if !nascosto
+                && let Some(rimasti) = secondi_rimasti(&c, ctx, adesso)
                 && (1..=5).contains(&rimasti)
                 && rimasti != ultimo_tic
             {
