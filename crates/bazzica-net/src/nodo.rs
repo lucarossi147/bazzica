@@ -9,6 +9,12 @@
 //! lobby edits) and broadcasts it with the replica hash. Every peer applies the same entries.
 //! If the host leaves, the first connected participant in join order takes over with a higher
 //! `epoca`; peers that are ahead hand it their replica, peers that are behind catch up.
+//!
+//! Resync: a follower whose replica mismatches the host's hash asks for a snapshot
+//! (`ChiediDa { da: 0 }`) and stops asking for missing entries until it arrives. An unanswered
+//! request is sent again after [`Config::attesa_istantanea_ms`] to whoever hosts by then, and is
+//! dropped when the host changes or the asked peer disconnects. A non-host that receives
+//! `ChiediDa` ignores it: the retry reaches the right host, so no extra message is needed.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,6 +35,8 @@ pub struct Config {
     pub pausa_fine_mano: u64,
     /// Minimum ms between two "che palo" calls of the same seat.
     pub pausa_palo: u64,
+    /// How long a snapshot request may go unanswered before it is sent again, in ms.
+    pub attesa_istantanea_ms: u64,
 }
 
 impl Default for Config {
@@ -37,6 +45,7 @@ impl Default for Config {
             ritardo_bot: (1300, 2200),
             pausa_fine_mano: 2000,
             pausa_palo: 3000,
+            attesa_istantanea_ms: 3000,
         }
     }
 }
@@ -79,6 +88,16 @@ struct Remoto {
     replica: bool,
 }
 
+/// A snapshot asked for and not received yet.
+#[derive(Clone, Debug)]
+struct RichiestaIstantanea<P> {
+    /// The peer asked.
+    a: P,
+    epoca: u64,
+    /// When it was asked, in ms.
+    dal: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Piano {
     Bot(Seat),
@@ -108,7 +127,7 @@ pub struct Nodo<P> {
     /// Connected peers and, once they said hello, who they are.
     peers: BTreeMap<P, Option<Remoto>>,
     rid: u64,
-    attesa_istantanea: bool,
+    attesa_istantanea: Option<RichiestaIstantanea<P>>,
     // host only
     piano: Option<(u64, u64, Piano)>,
     timer: Option<(ChiaveTimer, u64)>,
@@ -145,7 +164,7 @@ impl<P: Clone + Ord> Nodo<P> {
             host: None,
             peers: BTreeMap::new(),
             rid: 0,
-            attesa_istantanea: false,
+            attesa_istantanea: None,
             piano: None,
             timer: None,
             ultimo_palo: [None; 4],
@@ -214,10 +233,18 @@ impl<P: Clone + Ord> Nodo<P> {
 
     /// When the driver must call [`Nodo::tick`] next.
     pub fn prossima_sveglia(&self) -> Option<u64> {
-        [self.piano.map(|p| p.0), self.timer.as_ref().map(|t| t.1)]
-            .into_iter()
-            .flatten()
-            .min()
+        let istantanea = self
+            .attesa_istantanea
+            .as_ref()
+            .map(|r| r.dal + self.config.attesa_istantanea_ms);
+        [
+            self.piano.map(|p| p.0),
+            self.timer.as_ref().map(|t| t.1),
+            istantanea,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Checks the node's internal invariants (for tests and debug assertions):
@@ -265,6 +292,9 @@ impl<P: Clone + Ord> Nodo<P> {
         if self.peers.remove(p).is_none() {
             return;
         }
+        if self.attesa_istantanea.as_ref().is_some_and(|r| &r.a == p) {
+            self.attesa_istantanea = None;
+        }
         let host_presente = self
             .host
             .as_ref()
@@ -285,6 +315,7 @@ impl<P: Clone + Ord> Nodo<P> {
 
     pub fn tick(&mut self, ora: u64) {
         self.ora = ora;
+        self.ripeti_istantanea();
         while self.e_host() {
             if let Some((t, _, piano)) = self.piano
                 && t <= ora
@@ -468,12 +499,46 @@ impl<P: Clone + Ord> Nodo<P> {
         }
     }
 
+    /// Asks `p` for the entries from `da` on, or for a snapshot when `da` is 0.
     fn chiedi(&mut self, p: P, da: u64) {
-        if self.attesa_istantanea && da == 0 {
+        if da == 0 {
+            if self.istantanea_in_arrivo(&p) {
+                return;
+            }
+            self.attesa_istantanea = Some(RichiestaIstantanea {
+                a: p.clone(),
+                epoca: self.epoca,
+                dal: self.ora,
+            });
+        } else if self.attesa_istantanea.is_some() {
+            // a snapshot is coming: entries applied to a diverged replica would only mismatch
             return;
         }
-        self.attesa_istantanea |= da == 0;
         self.invia(Destinatario::Uno(p), Messaggio::ChiediDa { da });
+    }
+
+    /// Whether a snapshot was asked of `p` in this epoch and may still arrive.
+    fn istantanea_in_arrivo(&self, p: &P) -> bool {
+        self.attesa_istantanea.as_ref().is_some_and(|r| {
+            &r.a == p
+                && r.epoca == self.epoca
+                && self.ora < r.dal + self.config.attesa_istantanea_ms
+        })
+    }
+
+    /// Sends an expired snapshot request again, to whoever hosts now.
+    fn ripeti_istantanea(&mut self) {
+        let scaduta = self
+            .attesa_istantanea
+            .as_ref()
+            .is_some_and(|r| self.ora >= r.dal + self.config.attesa_istantanea_ms);
+        if !scaduta {
+            return;
+        }
+        self.attesa_istantanea = None;
+        if let Some(p) = self.peer_host() {
+            self.chiedi(p, 0);
+        }
     }
 
     fn istantanea_ricevuta(&mut self, epoca: u64, host: IdGiocatore, tavolo: Tavolo) {
@@ -616,6 +681,9 @@ impl<P: Clone + Ord> Nodo<P> {
 
     /// Follows `host` from `epoca` on (stepping down if we were host).
     fn segui(&mut self, epoca: u64, host: IdGiocatore) {
+        if (epoca, Some(&host)) != (self.epoca, self.host.as_ref()) {
+            self.attesa_istantanea = None;
+        }
         self.epoca = epoca;
         self.host = Some(host);
         if !self.e_host() {
@@ -664,7 +732,7 @@ impl<P: Clone + Ord> Nodo<P> {
         self.log.clear();
         self.log_base = tavolo.n;
         self.tavolo = Some(tavolo);
-        self.attesa_istantanea = false;
+        self.attesa_istantanea = None;
         self.uscite.push(Uscita::Sincronizzata);
         self.controlla();
     }
