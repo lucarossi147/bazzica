@@ -184,3 +184,51 @@ fn entra_in_un_tavolo_gia_creato() {
     }
     println!("joined after {:?}", t0.elapsed());
 }
+
+/// A player leaves (saying goodbye) and comes back: the host sees it gone within seconds,
+/// then gives the replica to the new connection.
+#[test]
+#[ignore]
+fn esce_e_rientra() {
+    let codice = nuovo_codice();
+    let inizio = Instant::now();
+    let ora = || inizio.elapsed().as_millis() as u64;
+    let apri = |nodo| {
+        let (s, ciclo) = Sessione::apri(
+            &codice,
+            NostrSignallerBuilder::default(),
+            nodo,
+            Turn::di_compilazione(),
+        );
+        std::thread::spawn(move || smol::block_on(ciclo));
+        s
+    };
+    let aspetta =
+        |sessioni: &mut [&mut Sessione], cosa: &str, f: &dyn Fn(&[&mut Sessione]) -> bool| {
+            let t0 = Instant::now();
+            while !f(sessioni) {
+                assert!(t0.elapsed() < Duration::from_secs(40), "timeout: {cosa}");
+                for s in sessioni.iter_mut() {
+                    s.aggiorna(ora());
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            println!("{:?} {cosa}", t0.elapsed());
+        };
+    let mut host = apri(Nodo::crea(io("a"), Impostazioni::default(), 1, config()));
+    let mut ospite = apri(Nodo::unisciti(io("b"), 2, config()));
+    aspetta(&mut [&mut host, &mut ospite], "b joined", &|s| {
+        s[1].nodo()
+            .tavolo()
+            .is_some_and(|t| t.partecipanti.len() == 2)
+    });
+    ospite.chiudi();
+    aspetta(&mut [&mut host, &mut ospite], "a saw b leave", &|s| {
+        !s[0].nodo().connessi().contains("b")
+    });
+    drop(ospite);
+    let mut di_nuovo = apri(Nodo::unisciti(io("b"), 3, config()));
+    aspetta(&mut [&mut host, &mut di_nuovo], "b back", &|s| {
+        s[1].nodo().tavolo().is_some() && s[0].nodo().connessi().contains("b")
+    });
+}

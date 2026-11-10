@@ -185,6 +185,9 @@ impl Ctx {
     }
 
     pub fn esci(&self) {
+        if let Some(c) = self.conn.peek().clone() {
+            c.chiudi();
+        }
         let mut conn = self.conn;
         conn.set(None);
         imposta_codice_url("");
