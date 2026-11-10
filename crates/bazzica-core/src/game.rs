@@ -534,6 +534,42 @@ fn rimuovi(v: &mut Vec<Card>, c: Card) {
 }
 
 impl GameState {
+    /// Checks a state that came from outside (another peer's snapshot) before using it: seats
+    /// and teams in range, no unknown card, and every card of the deck exactly once among deck,
+    /// table, hands, captures and the cards in transit during the exchange.
+    pub fn valida(&self) -> Result<(), String> {
+        let posti = [self.mazziere, self.primo_mazziere, self.corrente]
+            .into_iter()
+            .chain(self.giocate_mano.iter().map(|g| g.0));
+        if let Some(s) = posti.into_iter().find(|&s| s > 3) {
+            return Err(format!("seat {s} out of range"));
+        }
+        if self.ultima_presa_squadra.is_some_and(|t| t > 1) {
+            return Err("team out of range".into());
+        }
+        // cards "in transit" during the exchange belong to nobody yet
+        let in_viaggio = (0..4).filter_map(|x| {
+            let p = (x + 2) % 4;
+            (self.fase == Fase::Scambio && self.scambio_ricevuta[p].is_none())
+                .then_some(self.scambio_passata[x])
+                .flatten()
+        });
+        let mut tutte: Vec<Card> = self
+            .mazzo
+            .iter()
+            .chain(&self.tavola)
+            .chain(self.mani.iter().flatten())
+            .copied()
+            .chain(self.prese.iter().flatten().map(Entrata::carta))
+            .chain(in_viaggio)
+            .collect();
+        tutte.sort();
+        if tutte != *crate::cards::MAZZO {
+            return Err("cards not conserved".into());
+        }
+        Ok(())
+    }
+
     /// A blank state with no cards dealt (for tools and tests that set up positions).
     pub fn vuoto(regole: RulesConfig, seed: u64, rng: Mulberry32) -> GameState {
         GameState {

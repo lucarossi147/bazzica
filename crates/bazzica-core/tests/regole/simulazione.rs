@@ -7,24 +7,7 @@ use bazzica_core::game::DatiEvento;
 use bazzica_core::{Variante, Vincitore};
 
 fn controlla_invarianti(st: &GameState, events: &[Evento]) {
-    // cards "in transit" during the exchange belong to nobody yet
-    let in_viaggio = (0..4).filter_map(|x| {
-        let p = (x + 2) % 4;
-        (st.fase == Fase::Scambio && st.scambio_ricevuta[p].is_none())
-            .then_some(st.scambio_passata[x])
-            .flatten()
-    });
-    let mut tutte: Vec<Card> = st
-        .mazzo
-        .iter()
-        .chain(&st.tavola)
-        .chain(st.mani.iter().flatten())
-        .copied()
-        .chain(st.prese.iter().flatten().map(Entrata::carta))
-        .chain(in_viaggio)
-        .collect();
-    tutte.sort();
-    assert_eq!(tutte, *MAZZO, "cards not conserved");
+    st.valida().expect("a valid state");
     // the current turn's plays are exactly the cards no longer in hand
     if st.fase == Fase::Gioco {
         let obs = st.observation(0);
