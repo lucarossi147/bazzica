@@ -61,6 +61,9 @@ pub fn Partita(vista: Vista) -> Element {
                 obs: obs.clone(),
                 apri: move |f| finestra.set(Some(f)),
             }
+            if vista.host.is_none() && !finita {
+                div { class: "banner", "{crate::SENZA_REGIA}" }
+            }
             if !vista.disconnessi.is_empty() && !finita {
                 div { class: "banner",
                     "In pausa: aspettiamo "

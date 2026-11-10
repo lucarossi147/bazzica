@@ -10,6 +10,13 @@
 //! If the host leaves, the first connected participant in join order takes over with a higher
 //! `epoca`; peers that are ahead hand it their replica, peers that are behind catch up.
 //!
+//! Elections: candidates are peers known to hold a replica (`Ciao.replica`, refreshed by
+//! `HoReplica` when a peer gets its first snapshot). A peer claims only with a strict majority
+//! of the participants the host last reported connected (`Presenti`, sent by the host whenever
+//! that set changes), so two sides of a split network never both elect. Claims are not relayed:
+//! in a partial mesh (two peers that reach the host but not each other) the table may stay
+//! without a host until a link comes back; the app then says it cannot reach the host.
+//!
 //! Sessions: an identity may be open in two places (two tabs, a reload before the old link
 //! timed out). Each node has a [`Sessione`] (birth time, then a nonce) sent in `Ciao`; a peer
 //! that sees two sessions of one identity keeps the newer, forgets the older and sends it
@@ -172,6 +179,9 @@ pub struct Nodo<P> {
     sessione: Sessione,
     /// A newer session of our identity took over: this node stops acting.
     sostituito: bool,
+    /// Who the host last reported connected (itself included): elections need a strict
+    /// majority of it. Empty until the first report.
+    presenti: BTreeSet<IdGiocatore>,
     tavolo: Option<Tavolo>,
     /// Applied entries `log_base+1 ..= log_base+log.len()`, kept to resend to late peers.
     log: Vec<(Voce, String)>,
@@ -219,6 +229,7 @@ impl<P: Clone + Ord> Nodo<P> {
                 nonce: seme.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(17),
             },
             sostituito: false,
+            presenti: BTreeSet::new(),
             tavolo: None,
             log: vec![],
             log_base: 0,
@@ -258,6 +269,16 @@ impl<P: Clone + Ord> Nodo<P> {
     /// The host with its session (which of its tabs hosts).
     pub fn host_regia(&self) -> Option<&Regia> {
         self.host.as_ref()
+    }
+
+    /// Ids of the peers this node counts as possible hosts (they hold a replica).
+    pub fn peer_con_replica(&self) -> BTreeSet<IdGiocatore> {
+        self.peers
+            .values()
+            .flatten()
+            .filter(|r| r.replica)
+            .map(|r| r.id.clone())
+            .collect()
     }
 
     /// Set when another tab or page of the same identity took over this table.
@@ -398,6 +419,7 @@ impl<P: Clone + Ord> Nodo<P> {
         if !host_presente {
             self.elezione();
         }
+        self.aggiorna_presenti();
         if let Some(a) = &mut self.allineamento {
             a.attese.remove(p);
             if a.attese.is_empty() {
@@ -525,7 +547,10 @@ impl<P: Clone + Ord> Nodo<P> {
         };
         if matches!(
             msg,
-            Messaggio::Voce { .. } | Messaggio::Istantanea { .. } | Messaggio::Host { .. }
+            Messaggio::Voce { .. }
+                | Messaggio::Istantanea { .. }
+                | Messaggio::Host { .. }
+                | Messaggio::HoReplica
         ) {
             remoto.replica = true;
         }
@@ -557,6 +582,12 @@ impl<P: Clone + Ord> Nodo<P> {
             Messaggio::ChiediDa { da: da_n } => self.chiedi_da(p, da_n),
             Messaggio::Allineato { epoca, n, impronta } => {
                 self.allineato_ricevuto(p, epoca, n, impronta)
+            }
+            Messaggio::HoReplica => {}
+            Messaggio::Presenti { ids } => {
+                if self.host.as_ref() == Some(&regia) {
+                    self.presenti = ids;
+                }
             }
             Messaggio::Effimero(e) => {
                 if self.valida_effimero(&da, &e).is_ok() {
@@ -635,6 +666,7 @@ impl<P: Clone + Ord> Nodo<P> {
         if !self.e_host() {
             return;
         }
+        self.aggiorna_presenti();
         if self.tavolo.is_none() {
             return;
         }
@@ -1003,8 +1035,10 @@ impl<P: Clone + Ord> Nodo<P> {
             .iter()
             .find(|p| con_replica.contains(&p.id))
             .map(|p| p.id.clone());
+        // a strict majority of whom the host last saw: two sides of a split never both elect
+        let maggioranza = maggioranza(&connessi, &self.presenti);
         // alone (e.g. a phone that just woke up): never claim, our replica may be stale
-        if connessi.len() > 1 && candidato.as_ref() == Some(&self.io.id) {
+        if connessi.len() > 1 && maggioranza && candidato.as_ref() == Some(&self.io.id) {
             self.epoca += 1;
             self.host = Some(self.regia());
             let n = t.n;
@@ -1028,16 +1062,32 @@ impl<P: Clone + Ord> Nodo<P> {
                     n,
                 },
             );
+            self.aggiorna_presenti();
         } else {
             self.host = None;
             self.allineamento = None;
         }
     }
 
+    /// Host only: tells everyone who it sees connected, when that changed.
+    fn aggiorna_presenti(&mut self) {
+        if !self.e_host() {
+            return;
+        }
+        let connessi = self.connessi();
+        if connessi != self.presenti {
+            self.presenti = connessi.clone();
+            self.invia(Destinatario::Tutti, Messaggio::Presenti { ids: connessi });
+        }
+    }
+
     fn adotta(&mut self, tavolo: Tavolo) {
         self.log.clear();
         self.log_base = tavolo.n;
-        self.tavolo = Some(tavolo);
+        if self.tavolo.replace(tavolo).is_none() {
+            // peers that met us before we had a replica must learn we can host now
+            self.invia(Destinatario::Tutti, Messaggio::HoReplica);
+        }
         self.attesa_istantanea = None;
         self.uscite.push(Uscita::Sincronizzata);
         self.controlla();
@@ -1342,4 +1392,38 @@ fn chiave_timer(t: &Tavolo) -> Option<ChiaveTimer> {
         });
     }
     None
+}
+
+/// Whether `raggiunti` holds a strict majority of `vista` (an empty view gives no constraint).
+fn maggioranza(raggiunti: &BTreeSet<IdGiocatore>, vista: &BTreeSet<IdGiocatore>) -> bool {
+    vista.is_empty() || 2 * raggiunti.intersection(vista).count() > vista.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn insieme(ids: &[&str]) -> BTreeSet<IdGiocatore> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn maggioranza_stretta() {
+        let quattro = insieme(&["a", "b", "c", "d"]);
+        assert!(maggioranza(&insieme(&["b", "c", "d"]), &quattro));
+        assert!(
+            !maggioranza(&insieme(&["c", "d"]), &quattro),
+            "half is not enough"
+        );
+        assert!(!maggioranza(&insieme(&["b"]), &insieme(&["a", "b"])));
+        assert!(maggioranza(
+            &insieme(&["b", "c"]),
+            &insieme(&["a", "b", "c"])
+        ));
+        assert!(
+            maggioranza(&insieme(&["b", "x", "y"]), &insieme(&["b"])),
+            "outsiders do not count against"
+        );
+        assert!(maggioranza(&insieme(&["b"]), &BTreeSet::new()));
+    }
 }

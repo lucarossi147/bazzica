@@ -149,6 +149,9 @@ fn Stanza(vista: Vista) -> Element {
     let creatore = t.creatore() == &vista.io;
     rsx! {
         div { class: "stanza",
+            if vista.host.is_none() {
+                div { class: "banner", "{crate::SENZA_REGIA}" }
+            }
             if let Some(da) = &t.terminata_da {
                 div { class: "banner", "Partita interrotta da {vista.nome(da)}." }
             }
