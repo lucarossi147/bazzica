@@ -23,6 +23,7 @@ fn config() -> Config {
         ritardo_bot: (20, 50),
         pausa_fine_mano: 100,
         pausa_palo: 3000,
+        ..Config::default()
     }
 }
 

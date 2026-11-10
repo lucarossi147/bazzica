@@ -302,12 +302,18 @@ impl Tavolo {
         }
     }
 
-    /// Applies one log entry. On error the table is left unchanged.
-    pub fn applica(&mut self, voce: &Voce) -> Result<Vec<Evento>, Errore> {
+    /// The table after one log entry, leaving `self` untouched.
+    pub fn applicata(&self, voce: &Voce) -> Result<(Tavolo, Vec<Evento>), Errore> {
         let mut copia = self.clone();
         let eventi = copia.applica_interno(voce)?;
         copia.n += 1;
-        *self = copia;
+        Ok((copia, eventi))
+    }
+
+    /// Applies one log entry. On error the table is left unchanged.
+    pub fn applica(&mut self, voce: &Voce) -> Result<Vec<Evento>, Errore> {
+        let (nuovo, eventi) = self.applicata(voce)?;
+        *self = nuovo;
         Ok(eventi)
     }
 
@@ -438,6 +444,33 @@ mod tests {
             assert_eq!(Ritmo::da_nome(r.nome()), Some(r));
         }
         assert_eq!(Ritmo::da_nome("boh"), None);
+    }
+
+    fn io(id: &str) -> Partecipante {
+        Partecipante {
+            id: id.into(),
+            nome: id.into(),
+            avatar: AVATAR[0].into(),
+        }
+    }
+
+    #[test]
+    fn applicata_non_tocca_il_tavolo() {
+        let t = Tavolo::nuovo(io("a"), Impostazioni::default());
+        let (dopo, _) = t
+            .applicata(&Voce::Siedi {
+                id: "a".into(),
+                posto: 0,
+            })
+            .unwrap();
+        assert_eq!(t, Tavolo::nuovo(io("a"), Impostazioni::default()));
+        assert_eq!((dopo.n, dopo.posti_di("a")), (1, vec![0]));
+        let errore = t.applicata(&Voce::Siedi {
+            id: "x".into(),
+            posto: 0,
+        });
+        assert_eq!(errore, Err(Errore("Giocatore sconosciuto".into())));
+        assert_eq!(t, Tavolo::nuovo(io("a"), Impostazioni::default()));
     }
 
     #[test]

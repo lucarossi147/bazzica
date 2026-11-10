@@ -44,6 +44,8 @@ fn config() -> Config {
         ritardo_bot: (100, 300),
         pausa_fine_mano: 500,
         pausa_palo: 3000,
+        attesa_istantanea_ms: 500,
+        attesa_allineamento_ms: 1000,
     }
 }
 
@@ -82,6 +84,29 @@ impl Rete {
         }
         self.pompa();
         h
+    }
+
+    /// Adds several nodes at once: all links open before any message is delivered.
+    fn entrano_insieme(&mut self, nodi: Vec<Nodo<H>>) -> Vec<H> {
+        let nuovi: Vec<H> = nodi
+            .into_iter()
+            .map(|n| {
+                let h = self.prossimo;
+                self.prossimo += 1;
+                self.nodi.insert(h, n);
+                h
+            })
+            .collect();
+        let tutti: Vec<H> = self.nodi.keys().copied().collect();
+        for &h in &nuovi {
+            for &a in &tutti {
+                if a != h {
+                    self.collega_senza_pompare(a, h);
+                }
+            }
+        }
+        self.pompa();
+        nuovi
     }
 
     fn collega_senza_pompare(&mut self, a: H, b: H) {
@@ -127,7 +152,7 @@ impl Rete {
     }
 
     fn unisci(&mut self, id: &str) -> H {
-        let seme = id.bytes().map(u64::from).sum();
+        let seme = id.bytes().map(u64::from).sum::<u64>() + 1000 * u64::from(self.prossimo);
         self.entra(Nodo::unisciti(io(id), seme, config()))
     }
 
@@ -236,9 +261,14 @@ impl Rete {
         true
     }
 
-    /// Delivers everything until the network is quiet, then checks the invariants.
+    /// Delivers everything until the network is quiet. I1 is checked after every message,
+    /// I2 once the network is quiet.
     fn pompa(&mut self) {
-        while self.raccogli() | self.consegna_uno() {}
+        while self.raccogli() | self.consegna_uno() {
+            for n in self.nodi.values() {
+                n.verifica_invarianti().unwrap();
+            }
+        }
         self.verifica_invarianti();
     }
 
@@ -281,17 +311,21 @@ impl Rete {
         self.pompa();
     }
 
+    /// Nodes still acting (a tab superseded by a newer one of the same identity is frozen).
+    fn attivi(&self) -> impl Iterator<Item = &Nodo<H>> {
+        self.nodi.values().filter(|n| !n.sostituito())
+    }
+
     fn assert_sincronizzati(&self) {
         let impronte: BTreeSet<(u64, String)> = self
-            .nodi
-            .values()
+            .attivi()
             .map(|n| {
                 let t = n.tavolo().expect("replica");
                 (t.n, t.impronta())
             })
             .collect();
         assert_eq!(impronte.len(), 1, "replicas differ: {impronte:?}");
-        let host: BTreeSet<_> = self.nodi.values().map(|n| n.host().cloned()).collect();
+        let host: BTreeSet<_> = self.attivi().map(|n| n.host().cloned()).collect();
         assert_eq!(host.len(), 1, "peers disagree on the host: {host:?}");
     }
 
@@ -299,7 +333,7 @@ impl Rete {
     fn gioca_umani(&mut self, h: H, ack: bool) -> bool {
         let n = self.nodo(h);
         let t = n.tavolo().unwrap();
-        if t.stato != StatoTavolo::InCorso || n.in_pausa() {
+        if t.stato != StatoTavolo::InCorso || n.in_pausa() || n.sostituito() {
             return false;
         }
         let st = t.partita.as_ref().unwrap();
@@ -454,7 +488,10 @@ fn partita_completa_tra_quattro_peer() {
         // snapshots must fit in one WebRTC message (Safari: 64 KiB to be safe)
         let istantanea = Messaggio::Istantanea {
             epoca: 0,
-            host: "a".into(),
+            host: Regia {
+                id: "a".into(),
+                sessione: Sessione::default(),
+            },
             tavolo: Box::new(t.clone()),
         };
         let dim = istantanea.codifica().len();
@@ -618,6 +655,7 @@ fn versione_diversa_viene_segnalata() {
         Messaggio::Ciao {
             versione: VERSIONE_PROTOCOLLO + 1,
             io: io("b"),
+            sessione: Sessione::default(),
             replica: true,
         },
     );
@@ -654,6 +692,10 @@ fn impronta_diversa_forza_istantanea() {
         impronta: "deadbeefdeadbeef".into(),
     };
     r.coda.push_back((a, c, msg.codifica()));
+    // the mismatching entry is never committed: c stays where it was until the snapshot
+    assert!(r.consegna_uno());
+    assert_eq!(r.tavolo(c), &t, "the replica moved before the hash check");
+    r.nodo(c).verifica_invarianti().unwrap();
     r.pompa();
     r.assert_sincronizzati();
     assert_eq!(r.tavolo(c).n, t.n);
@@ -910,4 +952,341 @@ fn strumenti_della_rete() {
     r.collega(a, b);
     r.assert_sincronizzati();
     assert!(r.inviati.iter().any(|(_, d, _)| *d == c));
+}
+
+/// Makes `c`'s replica differ from the host's at the same `n`, by handing it a doctored
+/// snapshot as if it came from the host. Returns the host's handle.
+fn devia(r: &mut Rete, c: H) -> H {
+    let h = r.host_h();
+    let mut falso = r.tavolo(c).clone();
+    falso.impostazioni.nome = "Tavolo falso".into();
+    let msg = Messaggio::Istantanea {
+        epoca: r.nodo(c).epoca(),
+        host: r.nodo(c).host_regia().unwrap().clone(),
+        tavolo: Box::new(falso),
+    };
+    r.coda.push_back((h, c, msg.codifica()));
+    r.pompa();
+    assert_ne!(r.tavolo(c).impronta(), r.tavolo(h).impronta());
+    h
+}
+
+/// Plays and advances time until everyone agrees (or gives up after `giri` rounds).
+fn fino_a_sincronizzati(r: &mut Rete, giri: usize) {
+    for _ in 0..giri {
+        let impronte: BTreeSet<_> = r
+            .nodi
+            .values()
+            .map(|n| n.tavolo().map(Tavolo::impronta))
+            .collect();
+        if impronte.len() == 1 {
+            break;
+        }
+        let handles: Vec<H> = r.nodi.keys().copied().collect();
+        if !handles
+            .into_iter()
+            .fold(false, |m, h| r.gioca_umani(h, true) | m)
+        {
+            r.avanza(10_000);
+        }
+    }
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn richiesta_istantanea_persa_si_ripete() {
+    let (mut r, a, _, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    devia(&mut r, c);
+    // c notices on the next entry and asks for a snapshot, which is lost
+    r.perdi(a, c, |m| matches!(m, Messaggio::Istantanea { .. }));
+    let n = r.tavolo(a).n;
+    r.gioca_fino(n + 1);
+    assert!(
+        r.da_perdere.is_empty(),
+        "the snapshot was requested and lost"
+    );
+    fino_a_sincronizzati(&mut r, 50);
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn host_esce_mentre_chiedo_istantanea() {
+    let (mut r, a, b, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    devia(&mut r, c);
+    // the next entry reaches c, whose snapshot request is still on the wire when a leaves
+    r.perdi(c, a, |m| matches!(m, Messaggio::ChiediDa { da: 0 }));
+    let n = r.tavolo(a).n;
+    r.gioca_fino(n + 1);
+    assert!(r.da_perdere.is_empty());
+    r.esci(a);
+    assert!(r.nodo(b).e_host());
+    fino_a_sincronizzati(&mut r, 50);
+}
+
+#[test]
+fn chiedi_da_a_chi_non_e_host() {
+    let (mut r, a, b, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    devia(&mut r, c);
+    // a follower gets a snapshot request: it does not answer, and c still gets in sync
+    r.coda
+        .push_back((c, b, Messaggio::ChiediDa { da: 0 }.codifica()));
+    r.perdi(c, a, |m| matches!(m, Messaggio::ChiediDa { da: 0 }));
+    let n = r.tavolo(a).n;
+    r.gioca_fino(n + 1);
+    assert!(
+        !r.inviati
+            .iter()
+            .any(|(da, a2, m)| *da == b && *a2 == c && matches!(m, Messaggio::Istantanea { .. }))
+    );
+    fino_a_sincronizzati(&mut r, 50);
+}
+
+/// A hosts and watches with B and C; four bots play, so a bot move is always due.
+fn tavolo_tutti_bot() -> (Rete, H, H, H) {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let b = r.unisci("b");
+    let c = r.unisci("c");
+    for s in 0..4 {
+        r.richiedi(
+            a,
+            Richiesta::Bot {
+                posto: s,
+                aggiungi: true,
+            },
+        );
+    }
+    r.richiedi(a, Richiesta::Avvia);
+    (r, a, b, c)
+}
+
+/// `h` leaves; the others notice, but nothing is delivered yet.
+fn esci_senza_pompare(r: &mut Rete, h: H) {
+    r.nodi.remove(&h);
+    let ora = r.ora;
+    for v in r.stacca(h) {
+        r.nodi.get_mut(&v).unwrap().disconnesso(ora, &h);
+    }
+}
+
+#[test]
+fn voce_duplicata_diversa_forza_resync() {
+    let (mut r, a, _, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    devia(&mut r, c);
+    // the host repeats its last entry: c holds a different state at that position
+    let t = r.tavolo(a).clone();
+    let msg = Messaggio::Voce {
+        epoca: r.nodo(a).epoca(),
+        n: t.n,
+        voce: r.voci.last().unwrap().clone(),
+        impronta: t.impronta(),
+    };
+    r.coda.push_back((a, c, msg.codifica()));
+    r.pompa();
+    r.assert_sincronizzati();
+    assert_eq!(r.tavolo(c).n, t.n);
+}
+
+#[test]
+fn nuovo_host_non_agisce_prima_di_allinearsi() {
+    let (mut r, a, b, c) = tavolo_tutti_bot();
+    r.gioca_fino(30);
+    // b misses a's next entry, c applies it
+    r.perdi(a, b, |m| matches!(m, Messaggio::Voce { .. }));
+    r.avanza(10_000);
+    let (n_c, impronta_c) = (r.tavolo(c).n, r.tavolo(c).impronta());
+    assert_eq!(r.tavolo(b).n + 1, n_c);
+    // a leaves; b claims and ticks past the bot delay before hearing from anyone
+    esci_senza_pompare(&mut r, a);
+    r.tick_solo(b, 10_000);
+    assert_eq!(
+        r.tavolo(b).n + 1,
+        n_c,
+        "the new host sequenced before aligning"
+    );
+    r.pompa();
+    r.assert_sincronizzati();
+    assert!(r.nodo(b).e_host());
+    assert_eq!(
+        (r.tavolo(b).n, r.tavolo(b).impronta()),
+        (n_c, impronta_c),
+        "c's entry was kept"
+    );
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+#[test]
+fn allineamento_scade() {
+    let (mut r, a, b, c) = tavolo_tutti_bot();
+    r.gioca_fino(30);
+    let n = r.tavolo(b).n;
+    // c's answer to the claim is lost: b waits for it, but not forever
+    r.perdi(c, b, |m| matches!(m, Messaggio::Allineato { .. }));
+    r.esci(a);
+    assert!(r.nodo(b).e_host());
+    assert!(
+        r.da_perdere.is_empty(),
+        "c answered and the answer was lost"
+    );
+    r.tick_solo(b, config().attesa_allineamento_ms - 1);
+    assert_eq!(r.tavolo(b).n, n, "still aligning");
+    r.gioca_fino(n + 5);
+    assert!(r.tavolo(b).n >= n + 5, "the host resumed after the timeout");
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+
+fn quanti_host(r: &Rete) -> usize {
+    r.nodi.values().filter(|n| n.e_host()).count()
+}
+
+#[test]
+fn stessa_identita_due_schede() {
+    let (mut r, a, _, _) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    // a second tab of a opens the same table
+    let a2 = r.unisci("a");
+    assert_eq!(quanti_host(&r), 1);
+    assert!(
+        !r.nodo(a).e_host() && !r.nodo(a2).e_host(),
+        "a host by id, not by election"
+    );
+    r.assert_sincronizzati();
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+    assert_eq!(r.tavolo(a2).stato, StatoTavolo::Finita);
+}
+
+#[test]
+fn host_ricarica_la_pagina() {
+    let (mut r, a, b, _) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    let epoca = r.nodo(b).epoca();
+    // the host reloads: the new page connects before the old link times out
+    let a2 = r.unisci("a");
+    assert_eq!(quanti_host(&r), 1);
+    assert!(
+        r.nodo(b).e_host() && r.nodo(b).epoca() > epoca,
+        "taken over by election"
+    );
+    r.esci(a);
+    assert_eq!(quanti_host(&r), 1);
+    r.assert_sincronizzati();
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+    assert!(!r.nodo(a2).e_host());
+}
+
+#[test]
+fn richieste_alla_sessione_giusta() {
+    let (mut r, a, _, _) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    let a2 = r.unisci("a");
+    assert!(r.nodo(a).sostituito() && !r.nodo(a2).sostituito());
+    let (host, prima) = (r.host_h(), r.inviati.len());
+    let n = r.tavolo(host).n;
+    // b.s and a2.s requests reach the live host, never the superseded tab
+    r.gioca_fino(n + 10);
+    assert!(r.tavolo(host).n >= n + 10);
+    assert!(r.rifiuti.is_empty(), "{:?}", r.rifiuti);
+    let al_vecchio = r.inviati[prima..]
+        .iter()
+        .filter(|(_, d, m)| *d == a && matches!(m, Messaggio::Richiesta { .. }))
+        .count();
+    assert_eq!(al_vecchio, 0, "requests sent to the superseded tab");
+    // the superseded tab refuses to act
+    r.richiedi(a, Richiesta::Prosegui);
+    assert_eq!(
+        r.rifiuti[&a],
+        ["Questa partita è aperta in un'altra scheda"]
+    );
+}
+
+fn quanti_host_dopo(r: &Rete, dal: usize) -> usize {
+    r.inviati[dal..]
+        .iter()
+        .filter_map(|(da, _, m)| matches!(m, Messaggio::Host { .. }).then_some(*da))
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+#[test]
+fn entrano_insieme_poi_host_esce() {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    // b and c scan the code together: they meet before either has the replica
+    let bc = r.entrano_insieme(vec![
+        Nodo::unisciti(io("b"), 2, config()),
+        Nodo::unisciti(io("c"), 3, config()),
+    ]);
+    let (b, c) = (bc[0], bc[1]);
+    r.assert_sincronizzati();
+    assert!(
+        r.nodo(c).peer_con_replica().contains("b"),
+        "c knows b holds a replica"
+    );
+    assert!(r.nodo(b).peer_con_replica().contains("c"));
+    let prima = r.inviati.len();
+    r.esci(a);
+    assert_eq!(quanti_host_dopo(&r, prima), 1, "only b claims");
+    assert!(r.nodo(b).e_host() && !r.nodo(c).e_host());
+    r.assert_sincronizzati();
+}
+
+/// Four at the table, the host a, all seated with the default timers.
+fn quattro_umani() -> (Rete, [H; 4]) {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let b = r.unisci("b");
+    let c = r.unisci("c");
+    let d = r.unisci("d");
+    for (h, s) in [(a, 0), (b, 1), (c, 2), (d, 3)] {
+        r.richiedi(h, Richiesta::Siedi { posto: s });
+    }
+    r.richiedi(a, Richiesta::Avvia);
+    (r, [a, b, c, d])
+}
+
+#[test]
+fn rete_parziale_nessuno_split_brain() {
+    let (mut r, [a, b, c, d]) = quattro_umani();
+    r.gioca_fino(10);
+    r.scollega_coppia(b, c);
+    let n = r.tavolo(b).n;
+    r.esci(a);
+    // b and c cannot see each other: at most one of them may sequence
+    assert!(quanti_host(&r) <= 1);
+    for _ in 0..5 {
+        r.avanza(60_000);
+    }
+    let sequenziano: Vec<H> = [b, c, d]
+        .into_iter()
+        .filter(|&h| r.tavolo(h).n > n)
+        .collect();
+    assert!(sequenziano.len() <= 1, "split brain: {sequenziano:?}");
+}
+
+#[test]
+fn partizione_due_a_due() {
+    let (mut r, [a, b, c, d]) = quattro_umani();
+    r.gioca_fino(10);
+    for (x, y) in [(a, c), (a, d), (b, c), (b, d)] {
+        r.scollega_coppia(x, y);
+    }
+    assert!(r.nodo(a).e_host());
+    assert!(
+        r.nodo(c).host().is_none() && r.nodo(d).host().is_none(),
+        "the minority side does not elect"
+    );
+    let n = r.tavolo(c).n;
+    for _ in 0..5 {
+        r.avanza(60_000);
+    }
+    assert_eq!(r.tavolo(c).n, n);
+    assert_eq!(r.tavolo(d).n, n);
 }

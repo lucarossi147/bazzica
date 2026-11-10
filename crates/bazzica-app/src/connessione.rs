@@ -104,6 +104,12 @@ impl Connessione {
         });
     }
 
+    /// Takes the table back from another tab of the same identity.
+    pub fn riprendi(&self) {
+        self.sessione.borrow_mut().riprendi(ora());
+        self.riapri();
+    }
+
     /// Rebuilds the transport, keeping the replica (after sleep or a lost signaling link).
     pub fn riapri(&self) {
         self.riapri_con(turn_attivo());
