@@ -3,7 +3,8 @@
 //! STUN only finds a direct route; between phones on different networks (mobile data,
 //! carrier NAT) there often is none, and only a TURN server relaying the traffic works.
 //! TURN credentials come from the app's settings, else from the build (`BAZZICA_TURN_*`
-//! environment variables, e.g. from GitHub secrets), else the free Metered relay below.
+//! environment variables, from GitHub secrets). No credential lives in the source: a relay's
+//! password shipped in a public repository is anyone's quota.
 
 use std::sync::{Arc, Mutex};
 
@@ -14,15 +15,6 @@ use serde::{Deserialize, Serialize};
 pub const STUN: [&str; 2] = [
     "stun:stun.l.google.com:19302",
     "stun:stun.cloudflare.com:3478",
-];
-
-/// Free Metered relay (500 MB/month) used when the build sets no `BAZZICA_TURN_URLS`.
-/// Public by nature: it ships in the web app anyway.
-pub const METERED: [&str; 3] = [
-    "turn:global.relay.metered.ca:80 turn:global.relay.metered.ca:80?transport=tcp \
-     turn:global.relay.metered.ca:443 turns:global.relay.metered.ca:443?transport=tcp",
-    "68705ead3405f5627b722a3e",
-    "FUe4ZPtAnsM4wKBn",
 ];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,7 +42,7 @@ impl Turn {
         })
     }
 
-    /// The one baked into this build: the `BAZZICA_TURN_*` variables, else [`METERED`].
+    /// The one baked into this build from the `BAZZICA_TURN_*` variables, if any.
     pub fn di_compilazione() -> Option<Turn> {
         Turn::da_ambiente([
             option_env!("BAZZICA_TURN_URLS"),
@@ -60,16 +52,14 @@ impl Turn {
     }
 
     /// The build's relay when its URLs are set and non-blank (CI passes unset secrets as
-    /// empty strings), else [`METERED`].
+    /// empty strings).
     fn da_ambiente([urls, utente, segreto]: [Option<&str>; 3]) -> Option<Turn> {
-        match urls.filter(|u| !u.trim().is_empty()) {
-            Some(urls) => Turn::nuovo(
-                urls,
-                utente.unwrap_or_default(),
-                segreto.unwrap_or_default(),
-            ),
-            None => Turn::nuovo(METERED[0], METERED[1], METERED[2]),
-        }
+        let urls = urls.filter(|u| !u.trim().is_empty())?;
+        Turn::nuovo(
+            urls,
+            utente.unwrap_or_default(),
+            segreto.unwrap_or_default(),
+        )
     }
 }
 
@@ -95,6 +85,8 @@ pub struct Diagnosi {
     pub relay_collegati: Option<usize>,
     /// Other peers seen in the room through the relays.
     pub peer_visti: usize,
+    /// Live events ignored because their time is far from this device's clock.
+    pub scartati_orario: usize,
 }
 
 /// Shared between the signaller (which writes) and the session (which reads).
@@ -136,13 +128,9 @@ mod tests {
 
     #[test]
     fn turn_di_compilazione() {
-        let metered = Turn::da_ambiente([None; 3]).unwrap();
-        assert_eq!(metered.urls.len(), 4);
-        assert_eq!(metered.username, METERED[1]);
-        assert_eq!(
-            Turn::da_ambiente([Some(" "), Some(""), Some("")]),
-            Some(metered)
-        );
+        // no secrets (or blank ones, as CI passes unset secrets): no relay
+        assert_eq!(Turn::da_ambiente([None; 3]), None);
+        assert_eq!(Turn::da_ambiente([Some(" "), Some(""), Some("")]), None);
         let proprio = Turn::da_ambiente([Some("turn:mio:3478"), Some("u"), None]).unwrap();
         assert_eq!(
             proprio,
@@ -152,7 +140,8 @@ mod tests {
                 credential: "".into()
             }
         );
-        assert!(Turn::di_compilazione().is_some());
+        // tests are built without the secrets
+        assert_eq!(Turn::di_compilazione(), None);
     }
 
     #[test]

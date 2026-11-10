@@ -46,6 +46,8 @@ fn config() -> Config {
         pausa_palo: 3000,
         attesa_istantanea_ms: 500,
         attesa_allineamento_ms: 1000,
+        attesa_richiesta_ms: 1000,
+        attesa_sostituzione_ms: 60_000,
     }
 }
 
@@ -451,11 +453,19 @@ fn lobby_replicata() {
         "Non puoi liberare questo posto"
     );
     r.richiedi(a, Richiesta::Alzati { posto: 1 }); // the creator can
+    // a spectator cannot start the game (P14); a seated player can, with four seats taken
     r.richiedi(c, Richiesta::Avvia);
     assert_eq!(
         r.rifiuti[&c].last().unwrap(),
+        "Solo chi è seduto al tavolo può avviare la partita"
+    );
+    r.richiedi(b, Richiesta::Siedi { posto: 1 });
+    r.richiedi(b, Richiesta::Avvia);
+    assert_eq!(
+        r.rifiuti[&b].last().unwrap(),
         "Servono 4 giocatori (umani o bot)"
     );
+    r.richiedi(b, Richiesta::Alzati { posto: 1 });
     let t = r.tavolo(b);
     assert_eq!(
         t.partecipanti
@@ -690,6 +700,7 @@ fn impronta_diversa_forza_istantanea() {
         n: t.n + 1,
         voce,
         impronta: "deadbeefdeadbeef".into(),
+        timer: None,
     };
     r.coda.push_back((a, c, msg.codifica()));
     // the mismatching entry is never committed: c stays where it was until the snapshot
@@ -1085,6 +1096,7 @@ fn voce_duplicata_diversa_forza_resync() {
         n: t.n,
         voce: r.voci.last().unwrap().clone(),
         impronta: t.impronta(),
+        timer: None,
     };
     r.coda.push_back((a, c, msg.codifica()));
     r.pompa();
@@ -1289,4 +1301,446 @@ fn partizione_due_a_due() {
     }
     assert_eq!(r.tavolo(c).n, n);
     assert_eq!(r.tavolo(d).n, n);
+}
+
+#[test]
+fn richiesta_al_vecchio_host_viene_rispedita() {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let b = r.unisci("b");
+    let c = r.unisci("c");
+    // c's request is lost on the way to a, then a leaves and b takes over
+    r.perdi(c, a, |m| matches!(m, Messaggio::Richiesta { .. }));
+    r.richiedi(c, Richiesta::Siedi { posto: 1 });
+    assert!(r.da_perdere.is_empty());
+    r.esci(a);
+    assert!(r.nodo(b).e_host());
+    for _ in 0..5 {
+        r.avanza(5_000);
+    }
+    assert_eq!(r.tavolo(b).posti_di("c"), [1], "applied by the new host");
+    let siedi = r
+        .voci
+        .iter()
+        .filter(|v| matches!(v, Voce::Siedi { id, .. } if id == "c"))
+        .count();
+    assert_eq!(siedi, 1, "exactly once");
+    assert!(r.rifiuti.is_empty(), "{:?}", r.rifiuti);
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn richiesta_duplicata_ignorata() {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let c = r.unisci("c");
+    // the same request (same rid) reaches the host twice
+    let msg = Messaggio::Richiesta {
+        rid: 1,
+        richiesta: Richiesta::Siedi { posto: 1 },
+    };
+    r.coda.push_back((c, a, msg.codifica()));
+    r.coda.push_back((c, a, msg.codifica()));
+    r.pompa();
+    assert_eq!(r.tavolo(a).posti_di("c"), [1]);
+    assert!(r.rifiuti.is_empty(), "{:?}", r.rifiuti);
+    r.assert_sincronizzati();
+}
+
+/// Bots move until it is seat `s`'s turn to play a card.
+fn fino_al_turno_di(r: &mut Rete, s: u8) {
+    for _ in 0..200 {
+        let st = r.tavolo(r.host_h()).partita.clone().unwrap();
+        if st.fase == Fase::Gioco && st.required_actors().contains(&s) {
+            return;
+        }
+        r.avanza(1_000);
+    }
+    panic!("seat {s} never got the turn");
+}
+
+#[test]
+fn richiesta_non_piu_valida_scartata() {
+    let (mut r, a, b, _) = tavolo_tipico(Variante::Vanilla);
+    fino_al_turno_di(&mut r, 2);
+    let st = r.tavolo(b).partita.clone().unwrap();
+    let mossa = st
+        .legal_actions(2)
+        .into_iter()
+        .find(|m| matches!(m, Azione::Gioca { .. }))
+        .unwrap();
+    // b's move and its resends are lost until the turn timer plays for b
+    for _ in 0..50 {
+        r.perdi(b, a, |m| matches!(m, Messaggio::Richiesta { .. }));
+    }
+    r.richiedi(b, Richiesta::Azione(mossa));
+    assert_eq!(r.nodo(b).richieste_in_corso(), 1);
+    while !r
+        .voci
+        .iter()
+        .any(|v| matches!(v, Voce::Scaduto { seat: Some(2), .. }))
+    {
+        r.avanza(1_000);
+    }
+    r.da_perdere.clear();
+    r.avanza(5_000);
+    assert_eq!(r.nodo(b).richieste_in_corso(), 0, "dropped, not resent");
+    assert!(!r.rifiuti.contains_key(&b), "{:?}", r.rifiuti);
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn doppio_tocco_una_sola_richiesta() {
+    let (mut r, a, b, _) = tavolo_tipico(Variante::Vanilla);
+    fino_al_turno_di(&mut r, 2);
+    let st = r.tavolo(b).partita.clone().unwrap();
+    let mossa = st.legal_actions(2).remove(0);
+    let (ora, prima) = (r.ora, r.inviati.len());
+    let nodo = r.nodi.get_mut(&b).unwrap();
+    let rid = nodo.richiedi(ora, Richiesta::Azione(mossa.clone()));
+    assert_eq!(nodo.richiedi(ora, Richiesta::Azione(mossa)), rid);
+    r.pompa();
+    let mandate = r.inviati[prima..]
+        .iter()
+        .filter(|(da, d, m)| *da == b && *d == a && matches!(m, Messaggio::Richiesta { .. }))
+        .count();
+    assert_eq!(mandate, 1);
+    assert!(r.rifiuti.is_empty(), "{:?}", r.rifiuti);
+    assert_eq!(r.nodo(b).richieste_in_corso(), 0, "acknowledged");
+}
+
+/// Plays (humans answering at once, but never acknowledging) until the first hand ends.
+fn fino_a_fine_mano(r: &mut Rete) {
+    for _ in 0..10_000 {
+        let t = r.tavolo(r.host_h()).clone();
+        if t.partita.as_ref().unwrap().fase == Fase::FineMano {
+            return;
+        }
+        let handles: Vec<H> = r.nodi.keys().copied().collect();
+        if !handles
+            .into_iter()
+            .fold(false, |m, h| r.gioca_umani(h, false) | m)
+        {
+            r.avanza(10_000);
+        }
+    }
+    panic!("the hand never ended");
+}
+
+#[test]
+fn fine_mano_scade() {
+    let (mut r, a, _, _) = tavolo_tipico(Variante::Vanilla);
+    fino_a_fine_mano(&mut r);
+    let mano = r.tavolo(a).partita.as_ref().unwrap().mano_n;
+    // nobody acknowledges the summary: after the timer the next hand starts anyway
+    for _ in 0..10 {
+        r.avanza(60_000);
+    }
+    let st = r.tavolo(a).partita.clone().unwrap();
+    assert!(st.mano_n > mano, "still waiting at the end of hand {mano}");
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn fine_mano_senza_timer_aspetta() {
+    let (mut r, a, _, _) = tavolo_tipico(Variante::Vanilla);
+    r.richiedi(a, Richiesta::Termina);
+    r.richiedi(
+        a,
+        Richiesta::Imposta(Impostazioni {
+            timer_fine_mano: 0,
+            ..imp(Variante::Vanilla)
+        }),
+    );
+    r.richiedi(a, Richiesta::Avvia);
+    fino_a_fine_mano(&mut r);
+    for _ in 0..10 {
+        r.avanza(3_600_000);
+    }
+    let st = r.tavolo(a).partita.clone().unwrap();
+    assert_eq!(
+        (st.fase, st.mano_n),
+        (Fase::FineMano, 1),
+        "waits for everyone"
+    );
+}
+
+#[test]
+fn giocatore_sparito_sostituito() {
+    let (mut r, a, b, _) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    r.esci(b);
+    assert!(r.nodo(a).in_pausa());
+    // too early: b may still come back
+    r.richiedi(a, Richiesta::Sostituisci { posto: 2 });
+    assert_eq!(
+        r.rifiuti[&a].last().unwrap(),
+        "Aspetta ancora un po': potrebbe ricollegarsi"
+    );
+    r.avanza(config().attesa_sostituzione_ms);
+    assert_eq!(r.nodo(a).sostituibili(), ["b"]);
+    r.richiedi(a, Richiesta::Sostituisci { posto: 2 });
+    let t = r.tavolo(a);
+    assert!(t.e_bot(2) && t.sostituiti[2].as_deref() == Some("b"));
+    assert!(!r.nodo(a).in_pausa());
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+    assert_eq!(r.tavolo(a).stato, StatoTavolo::Finita);
+}
+
+#[test]
+fn giocatore_torna_e_riprende_il_posto() {
+    let (mut r, a, b, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    r.esci(b);
+    r.avanza(config().attesa_sostituzione_ms);
+    r.richiedi(a, Richiesta::Sostituisci { posto: 2 });
+    r.gioca_fino(40);
+    // c never sat there: refused; b comes back and takes its seat again
+    r.richiedi(c, Richiesta::Riprendi { posto: 2 });
+    assert_eq!(r.rifiuti[&c].last().unwrap(), "Questo posto non era tuo");
+    let b2 = r.unisci("b");
+    r.richiedi(b2, Richiesta::Riprendi { posto: 2 });
+    assert_eq!(r.tavolo(a).posti_di("b"), [2]);
+    assert!(r.tavolo(a).sostituiti[2].is_none());
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+
+// ------------------------------------------------------------------ untrusted input (P13)
+
+/// A replica `c` would accept from the host, with `guasta` applied to it.
+fn istantanea_guasta(r: &Rete, c: H, guasta: impl Fn(&mut Tavolo)) -> Vec<u8> {
+    let mut t = r.tavolo(c).clone();
+    guasta(&mut t);
+    Messaggio::Istantanea {
+        epoca: r.nodo(c).epoca(),
+        host: r.nodo(c).host_regia().unwrap().clone(),
+        tavolo: Box::new(t),
+    }
+    .codifica()
+}
+
+#[test]
+fn istantanee_guaste_rifiutate() {
+    let (mut r, a, _, c) = tavolo_tipico(Variante::Vanilla);
+    r.gioca_fino(20);
+    let prima = r.tavolo(c).clone();
+    let guasti: [fn(&mut Tavolo); 3] = [
+        |t| t.partita.as_mut().unwrap().mani[0][0] = bazzica_core::Card::IGNOTA,
+        |t| t.partita.as_mut().unwrap().corrente = 9,
+        |t| t.partita.as_mut().unwrap().mazzo.clear(),
+    ];
+    for guasta in guasti {
+        let b = istantanea_guasta(&r, c, guasta);
+        r.coda.push_back((a, c, b));
+        r.pompa();
+        assert_eq!(r.tavolo(c), &prima, "an invalid snapshot was adopted");
+    }
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+
+#[test]
+fn striscia_con_posto_impossibile() {
+    let (mut r, a, _, c) = tavolo_tipico(Variante::Vanilla);
+    let m = Messaggio::Effimero(Effimero::Striscia {
+        seat: 255,
+        verso: 2,
+    });
+    r.coda.push_back((a, c, m.codifica()));
+    r.pompa();
+    assert!(r.effimeri.get(&c).is_none_or(Vec::is_empty));
+}
+
+#[test]
+fn host_con_epoca_enorme_ignorato() {
+    let (mut r, a, b, c) = tavolo_tipico(Variante::Vanilla);
+    let m = Messaggio::Host {
+        epoca: u64::MAX,
+        n: 0,
+    };
+    r.coda.push_back((b, a, m.codifica()));
+    r.coda.push_back((b, c, m.codifica()));
+    r.pompa();
+    assert!(r.nodo(a).e_host(), "a stays host");
+    assert_eq!(r.nodo(c).host().map(String::as_str), Some("a"));
+    r.gioca_fino(u64::MAX);
+    r.assert_sincronizzati();
+}
+
+/// Changes one random leaf of a JSON value (numbers get extreme or seat-like values).
+fn muta(v: &mut serde_json::Value, rng: &mut bazzica_core::Mulberry32) {
+    use serde_json::Value;
+    let figli = match v {
+        Value::Array(a) if !a.is_empty() => a.len(),
+        Value::Object(o) if !o.is_empty() => o.len(),
+        _ => 0,
+    };
+    if figli == 0 {
+        *v = match rng.next_u32() % 8 {
+            0 => Value::from(255),
+            1 => Value::from(9),
+            2 => Value::from(u64::MAX),
+            3 => Value::from(-1),
+            4 => Value::from("?"),
+            5 => Value::Bool(rng.next_u32().is_multiple_of(2)),
+            6 => Value::Array(vec![]),
+            _ => Value::from(rng.next_u32() % 50),
+        };
+        return;
+    }
+    let i = rng.next_u32() as usize % figli;
+    match v {
+        Value::Array(a) => muta(&mut a[i], rng),
+        Value::Object(o) => {
+            let k = o.keys().nth(i).unwrap().clone();
+            muta(o.get_mut(&k).unwrap(), rng);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn messaggi_mutati_non_fanno_danni() {
+    let (mut r, a, b, c) = tavolo_tipico(Variante::Vanilla);
+    let x = r.unisci("x");
+    r.gioca_fino(30);
+    let mut veri: Vec<serde_json::Value> = r
+        .inviati
+        .iter()
+        .map(|(_, _, m)| serde_json::to_value(m).unwrap())
+        .collect();
+    // kinds a normal game may not have sent yet
+    for m in [
+        Messaggio::Effimero(Effimero::Striscia { seat: 1, verso: 0 }),
+        Messaggio::Effimero(Effimero::Frase { seat: 0, indice: 1 }),
+        Messaggio::Host { epoca: 1, n: 3 },
+        Messaggio::Allineato {
+            epoca: 1,
+            n: 3,
+            impronta: "x".into(),
+        },
+        Messaggio::Presenti {
+            ids: ["a".to_string()].into(),
+        },
+    ] {
+        veri.push(serde_json::to_value(m).unwrap());
+    }
+    let mut per_tipo: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    for v in veri {
+        let tipo = format!(
+            "{}{}",
+            v["msg"],
+            v.get("effetto").map_or(String::new(), |e| e.to_string())
+        );
+        per_tipo.entry(tipo).or_default().push(v);
+    }
+    let tipi: Vec<Vec<serde_json::Value>> = per_tipo.into_values().collect();
+    // fixed in CI; `SEME_FUZZ=<n>` explores other seeds
+    let seme = std::env::var("SEME_FUZZ")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2026);
+    let mut rng = bazzica_core::Mulberry32::new(seme);
+    let mut consegnati = 0;
+    for _ in 0..1_000_000 {
+        if consegnati == 10_000 {
+            break;
+        }
+        // a kind of message first, so rare kinds get mutated as often as entries
+        let tipo = &tipi[rng.next_u32() as usize % tipi.len()];
+        let mut v = tipo[rng.next_u32() as usize % tipo.len()].clone();
+        for _ in 0..1 + rng.next_u32() % 3 {
+            muta(&mut v, &mut rng);
+        }
+        let Ok(m) = serde_json::from_value::<Messaggio>(v) else {
+            continue;
+        };
+        // x, a participant, attacks c only; a and b are honest
+        consegnati += 1;
+        r.coda.push_back((x, c, m.codifica()));
+        r.consegna_uno();
+        r.coda.retain(|(da, _, _)| *da != c);
+        let _ = r.nodi.get_mut(&c).unwrap().uscite();
+        // what the UI does with the replica must not panic either
+        if let Some(st) = r.nodo(c).tavolo().and_then(|t| t.partita.as_ref()) {
+            for s in 0..4 {
+                let _ = st.observation(s);
+                let _ = st.legal_actions(s);
+            }
+        }
+    }
+    assert_eq!(consegnati, 10_000, "mutated messages delivered");
+    r.pompa();
+    let onesti: BTreeSet<_> = [a, b]
+        .iter()
+        .map(|h| (r.tavolo(*h).n, r.tavolo(*h).impronta()))
+        .collect();
+    assert_eq!(onesti.len(), 1, "honest peers diverged");
+}
+
+#[test]
+fn lo_spettatore_non_cambia_le_regole() {
+    let (mut r, a, _, c) = tavolo_tipico(Variante::Vanilla);
+    r.richiedi(a, Richiesta::Termina);
+    r.richiedi(c, Richiesta::Imposta(imp(Variante::Heisenberg)));
+    assert_eq!(
+        r.rifiuti[&c].last().unwrap(),
+        "Solo chi ha creato il tavolo può cambiare le regole"
+    );
+    assert_eq!(r.tavolo(a).impostazioni.variante, Variante::Vanilla);
+    // with the creator gone, the host may
+    r.esci(a);
+    let b = r.host_h();
+    r.richiedi(b, Richiesta::Imposta(imp(Variante::Heisenberg)));
+    assert_eq!(r.tavolo(b).impostazioni.variante, Variante::Heisenberg);
+}
+
+#[test]
+fn riconnettersi_non_ripete_entra() {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let lungo = Partecipante {
+        id: "b".into(),
+        nome: "  Un nome davvero troppo lungo per il tavolo  ".into(),
+        avatar: "non un avatar".into(),
+    };
+    let b = r.entra(Nodo::unisciti(lungo, 2, config()));
+    let entra = |r: &Rete| {
+        r.voci
+            .iter()
+            .filter(|v| matches!(v, Voce::Entra(p) if p.id == "b"))
+            .count()
+    };
+    assert_eq!(entra(&r), 1);
+    let avatar = r.tavolo(a).partecipante("b").unwrap().avatar.clone();
+    let mut b = b;
+    for _ in 0..3 {
+        let n = r.isola(b);
+        b = r.entra(n);
+    }
+    assert_eq!(entra(&r), 1, "a reconnection is not a new entry");
+    assert_eq!(r.tavolo(a).partecipante("b").unwrap().avatar, avatar);
+}
+
+#[test]
+fn il_conto_alla_rovescia_segue_quello_della_regia() {
+    // the host only watches, so its leaving does not pause the game
+    let (mut r, a, b, _) = tavolo_host_spettatore();
+    fino_al_turno_di(&mut r, 0);
+    let host = r.nodo(a).timer().expect("b's play timer runs on the host");
+    assert_eq!(
+        r.nodo(b).timer(),
+        Some(host),
+        "the follower knows the host's deadline"
+    );
+    // after a takeover the new host's timer reaches the others with its next entry
+    r.esci(a);
+    let nuovo = r.host_h();
+    r.gioca_fino(r.tavolo(nuovo).n + 3);
+    let atteso = r.nodo(nuovo).timer();
+    for h in r.nodi.keys() {
+        assert_eq!(r.nodo(*h).timer(), atteso);
+    }
 }

@@ -171,14 +171,19 @@ fn Stanza(vista: Vista) -> Element {
                         "Est–Ovest"
                     }
                 }
-                button {
-                    class: "primario",
-                    disabled: !completi,
-                    onclick: move |_| ctx.richiedi(Richiesta::Avvia),
-                    if completi { "Inizia la partita" } else { "Servono 4 giocatori (anche bot)" }
+                if vista.puo(&Richiesta::Avvia) {
+                    button {
+                        class: "primario",
+                        disabled: !completi,
+                        onclick: move |_| ctx.richiedi(Richiesta::Avvia),
+                        if completi { "Inizia la partita" } else { "Servono 4 giocatori (anche bot)" }
+                    }
                 }
             }
-            Regole { imp: t.impostazioni.clone() }
+            Regole {
+                imp: t.impostazioni.clone(),
+                modificabili: vista.puo(&Richiesta::Imposta(t.impostazioni.clone())),
+            }
             Presenti { vista: vista.clone() }
         }
     }
@@ -200,7 +205,9 @@ fn Sedia(vista: Vista, seat: usize, creatore: bool) -> Element {
         },
         Some(Posto::Bot) => rsx! {
             span { class: "nome", "{AVATAR_BOT} Bot" }
-            button { class: "piccolo secondario", onclick: move |_| ctx.richiedi(Richiesta::Bot { posto, aggiungi: false }), "Togli" }
+            if vista.puo(&Richiesta::Bot { posto, aggiungi: false }) {
+                button { class: "piccolo secondario", onclick: move |_| ctx.richiedi(Richiesta::Bot { posto, aggiungi: false }), "Togli" }
+            }
         },
         Some(Posto::Umano { id }) => {
             let mio = id == &vista.io;
@@ -229,13 +236,14 @@ fn Sedia(vista: Vista, seat: usize, creatore: bool) -> Element {
 }
 
 #[component]
-fn Regole(imp: Impostazioni) -> Element {
+fn Regole(imp: Impostazioni, modificabili: bool) -> Element {
     let ctx = use_context::<Ctx>();
     let imposta = move |nuove: Impostazioni| ctx.richiedi(Richiesta::Imposta(nuove));
     let durate = [0u32, 10, 15, 20, 30, 45, 60, 90];
     let mut guida = use_signal(|| false);
     let capitolo = bazzica_core::guida::capitolo(imp.variante);
     let apertura = Apertura::per(imp.variante, imp.margherita);
+    let i8 = imp.clone();
     let (i1, i2, i3, i4, i5, i6, i7) = (
         imp.clone(),
         imp.clone(),
@@ -248,8 +256,12 @@ fn Regole(imp: Impostazioni) -> Element {
     rsx! {
         div { class: "pannello",
             h3 { "Regole" }
+            if !modificabili {
+                p { class: "nota", "Le regole le sceglie chi ha creato il tavolo." }
+            }
             label { "Variante" }
             select {
+                disabled: !modificabili,
                 onchange: move |e| {
                     if let Some(v) = Variante::from_nome(&e.value()) {
                         imposta(Impostazioni { variante: v, ..i1.clone() });
@@ -266,6 +278,7 @@ fn Regole(imp: Impostazioni) -> Element {
             }
             label { class: "spunta",
                 input {
+                    disabled: !modificabili,
                     r#type: "checkbox",
                     checked: imp.margherita,
                     onchange: move |e| imposta(Impostazioni { margherita: e.checked(), ..i2.clone() }),
@@ -276,6 +289,7 @@ fn Regole(imp: Impostazioni) -> Element {
                 div {
                     label { "Tempo per giocare" }
                     select {
+                        disabled: !modificabili,
                         onchange: move |e| imposta(Impostazioni { timer_giocata: e.value().parse().unwrap_or(15), ..i3.clone() }),
                         for d in durate {
                             option { value: "{d}", selected: d == imp.timer_giocata, {durata(d)} }
@@ -285,15 +299,27 @@ fn Regole(imp: Impostazioni) -> Element {
                 div {
                     label { "Tempo per lo scambio" }
                     select {
+                        disabled: !modificabili,
                         onchange: move |e| imposta(Impostazioni { timer_scambio: e.value().parse().unwrap_or(30), ..i4.clone() }),
                         for d in durate {
                             option { value: "{d}", selected: d == imp.timer_scambio, {durata(d)} }
                         }
                     }
                 }
+                div {
+                    label { "Attesa a fine mano" }
+                    select {
+                        disabled: !modificabili,
+                        onchange: move |e| imposta(Impostazioni { timer_fine_mano: e.value().parse().unwrap_or(30), ..i8.clone() }),
+                        for d in durate {
+                            option { value: "{d}", selected: d == imp.timer_fine_mano, {durata(d)} }
+                        }
+                    }
+                }
             }
             label { "Velocità dei bot" }
             select {
+                disabled: !modificabili,
                 onchange: move |e| {
                     if let Some(r) = Ritmo::da_nome(&e.value()) {
                         imposta(Impostazioni { ritmo: r, ..i7.clone() });
@@ -307,6 +333,7 @@ fn Regole(imp: Impostazioni) -> Element {
                 div {
                     label { "Squadra Nord–Sud" }
                     input {
+                        disabled: !modificabili,
                         value: "{imp.squadre[0]}",
                         maxlength: 20,
                         onchange: move |e| {
@@ -319,6 +346,7 @@ fn Regole(imp: Impostazioni) -> Element {
                 div {
                     label { "Squadra Est–Ovest" }
                     input {
+                        disabled: !modificabili,
                         value: "{imp.squadre[1]}",
                         maxlength: 20,
                         onchange: move |e| {

@@ -1,25 +1,30 @@
 //! A matchbox [`Signaller`] that uses public Nostr relays instead of a signaling server.
 //!
-//! Every peer publishes encrypted "envelopes" to all relays and listens on all of them:
-//! - `annuncio`: "I am in the room" (on join and on every keep-alive);
-//! - `segnale`: a WebRTC offer/answer/ICE candidate for one peer;
-//! - `addio`: "I am leaving".
+//! Every peer publishes encrypted envelopes ([`Busta`]) to all relays and listens on all of
+//! them. Who offers to whom, and how failed pairs retry, is decided by [`Incontri`].
 //!
-//! For each pair, the peer with the lower id makes the WebRTC offer (matchbox's `NewPeer`).
+//! Only live events count: what a relay replays from storage (before its end-of-stored-events
+//! marker) comes from peers that may be long gone, so it is ignored. Clocks are not compared
+//! for that, so peers whose clocks disagree still meet ([`ETA_MASSIMA`] only drops absurd
+//! timestamps, and counts them for the "wrong clock" hint).
+//!
+//! The session tells the signaller about WebRTC links that opened or closed, and when it must
+//! say goodbye, through [`Notizie`]; the signaller looks at them at least once a second.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use futures::stream::SelectAll;
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use matchbox_socket::async_trait::async_trait;
 use matchbox_socket::{
-    PeerEvent, PeerId, PeerRequest, PeerSignal, SignalingError, Signaller, SignallerBuilder,
+    PeerEvent, PeerId, PeerRequest, SignalingError, Signaller, SignallerBuilder,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sync_wrapper::SyncWrapper;
 
 use crate::ice::{DiagnosiCondivisa, aggiorna};
+use crate::incontri::{Azione, Busta, Incontri};
 use crate::nostr::{Chiavi, KIND_SEGNALE, Stanza, casuale};
 use crate::ws;
 
@@ -36,11 +41,29 @@ pub const RELAY_PREDEFINITI: [&str; 7] = [
     "wss://nostr.mom",
 ];
 
+/// Events stamped further than this from the local clock (s) are ignored and counted.
+pub const ETA_MASSIMA: u64 = 600;
+
+/// From the session to the signaller.
+#[derive(Debug, Default)]
+pub struct Notizie {
+    /// WebRTC links that opened (`true`) or closed, by matchbox peer.
+    pub collegamenti: VecDeque<(PeerId, bool)>,
+    /// Say goodbye to the room and stop.
+    pub chiudi: bool,
+}
+
+pub type NotizieCondivise = Arc<Mutex<Notizie>>;
+
 #[derive(Debug, Clone)]
 pub struct NostrSignallerBuilder {
     pub relays: Vec<String>,
     /// Progress of the signaling, for the UI.
     pub diagnosi: DiagnosiCondivisa,
+    pub notizie: NotizieCondivise,
+    /// The room derived from the code, kept: deriving it is deliberately slow, and matchbox
+    /// makes a new signaller on every reconnection attempt.
+    pub stanza: Arc<Mutex<Option<(String, Stanza)>>>,
 }
 
 impl Default for NostrSignallerBuilder {
@@ -48,25 +71,10 @@ impl Default for NostrSignallerBuilder {
         NostrSignallerBuilder {
             relays: RELAY_PREDEFINITI.map(String::from).to_vec(),
             diagnosi: DiagnosiCondivisa::default(),
+            notizie: NotizieCondivise::default(),
+            stanza: Arc::default(),
         }
     }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "t", rename_all = "snake_case")]
-enum Busta {
-    Annuncio {
-        da: PeerId,
-        a: Option<PeerId>,
-    },
-    Segnale {
-        da: PeerId,
-        a: PeerId,
-        s: PeerSignal,
-    },
-    Addio {
-        da: PeerId,
-    },
 }
 
 fn errore(m: impl Into<String>) -> SignalingError {
@@ -86,16 +94,112 @@ pub fn adesso() -> u64 {
     }
 }
 
+/// A relay frame, as far as the signaller cares.
+#[derive(Debug, PartialEq)]
+enum Frame {
+    Evento {
+        id: String,
+        creato: u64,
+        contenuto: String,
+    },
+    /// End of the stored events of our subscription: what follows is live.
+    FineStorico,
+    /// A notice, a closed subscription, or a refused event.
+    Avviso,
+    Altro,
+}
+
+fn classifica(frame: &str) -> Frame {
+    let Ok(v) = serde_json::from_str::<Value>(frame) else {
+        return Frame::Altro;
+    };
+    let evento = || -> Option<Frame> {
+        let ev = v.get(2)?;
+        Some(Frame::Evento {
+            id: ev.get("id")?.as_str()?.to_owned(),
+            creato: ev.get("created_at")?.as_u64()?,
+            contenuto: ev.get("content")?.as_str()?.to_owned(),
+        })
+    };
+    match v.get(0).and_then(Value::as_str) {
+        Some("EVENT") => evento().unwrap_or(Frame::Altro),
+        Some("EOSE") => Frame::FineStorico,
+        Some("NOTICE" | "CLOSED") => Frame::Avviso,
+        // a relay refusing our event (e.g. rate limit)
+        Some("OK") if v.get(2) == Some(&Value::Bool(false)) => Frame::Avviso,
+        _ => Frame::Altro,
+    }
+}
+
+/// Whether an event stamped `creato` is plausible on a device whose clock says `adesso`.
+fn eta_plausibile(creato: u64, adesso: u64) -> bool {
+    creato.abs_diff(adesso) <= ETA_MASSIMA
+}
+
+/// Seconds between attempts to reconnect a relay that closed or never answered.
+const RIPROVA_RELAY: u64 = 30;
+
+/// One relay: its connection while open, and when to try again otherwise.
+struct Relay {
+    url: String,
+    uscita: Option<ws::Uscita>,
+    /// Its stored events are over: what it sends now is live.
+    dal_vivo: bool,
+    prossimo_tentativo: u64,
+}
+
+/// Frames of every relay, tagged with the relay's index; `None` once that relay closed.
+type Entrate = SelectAll<futures::stream::BoxStream<'static, (usize, Option<String>)>>;
+
+/// Connects to a relay and subscribes to the room: the sender and the tagged frames.
+async fn apri_relay(
+    url: &str,
+    i: usize,
+    stanza: &Stanza,
+) -> Result<
+    (
+        ws::Uscita,
+        futures::stream::BoxStream<'static, (usize, Option<String>)>,
+    ),
+    String,
+> {
+    let (mut tx, rx) = connetti_entro(url, ATTESA_RELAY).await?;
+    // stored events are ignored anyway: `since` only bounds what relays replay
+    let filtro = json!({"kinds": [KIND_SEGNALE], "#t": [stanza.etichetta], "since": adesso().saturating_sub(ETA_MASSIMA)});
+    let req = json!(["REQ", "bazzica", filtro]).to_string();
+    if !invia_entro(&mut tx, req, ATTESA_RELAY).await {
+        return Err("subscription refused".into());
+    }
+    let fine = futures::stream::once(async move { (i, None) });
+    Ok((tx, rx.map(move |f| (i, Some(f))).chain(fine).boxed()))
+}
+
 pub struct NostrSignaller {
     stanza: Stanza,
     chiavi: Chiavi,
     io: PeerId,
-    uscite: SyncWrapper<Vec<ws::Uscita>>,
-    entrate: SyncWrapper<SelectAll<ws::Entrata>>,
+    relay: SyncWrapper<Vec<Relay>>,
+    entrate: SyncWrapper<Entrate>,
     pendenti: VecDeque<PeerEvent>,
     incontri: Incontri,
     visti: HashSet<String>,
     diagnosi: DiagnosiCondivisa,
+    notizie: NotizieCondivise,
+}
+
+impl NostrSignallerBuilder {
+    fn stanza(&self, codice: &str) -> Stanza {
+        let codice = &crate::nostr::normalizza_codice(codice);
+        let mut cache = self.stanza.lock().unwrap_or_else(|e| e.into_inner());
+        match &*cache {
+            Some((c, s)) if c == codice => s.clone(),
+            _ => {
+                let s = Stanza::new(codice);
+                *cache = Some((codice.to_owned(), s.clone()));
+                s
+            }
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -106,31 +210,40 @@ impl SignallerBuilder for NostrSignallerBuilder {
         _attempts: Option<u16>,
         codice: String,
     ) -> Result<Box<dyn Signaller>, SignalingError> {
-        let stanza = Stanza::new(&codice);
+        let stanza = self.stanza(&codice);
         let totali = self.relays.len();
         // matchbox retries with a new signaller: keep the last outcome visible meanwhile
         aggiorna(&self.diagnosi, |d| d.relay_totali = totali);
-        let connessioni =
-            futures::future::join_all(self.relays.iter().map(|r| connetti_entro(r, ATTESA_RELAY)))
-                .await;
-        let mut uscite = vec![];
+        let aperti = futures::future::join_all(
+            self.relays
+                .iter()
+                .enumerate()
+                .map(|(i, url)| apri_relay(url, i, &stanza)),
+        )
+        .await;
+        let mut relay = vec![];
         let mut entrate = SelectAll::new();
-        let filtro = json!({"kinds": [KIND_SEGNALE], "#t": [stanza.etichetta], "since": adesso().saturating_sub(30)});
-        let req = json!(["REQ", "bazzica", filtro]).to_string();
-        for (relay, c) in self.relays.iter().zip(connessioni) {
-            match c {
-                Ok((mut tx, rx)) => {
-                    if tx.send(req.clone()).await.is_ok() {
-                        uscite.push(tx);
-                        entrate.push(rx);
-                    }
+        for (url, aperto) in self.relays.iter().zip(aperti) {
+            let uscita = match aperto {
+                Ok((tx, rx)) => {
+                    entrate.push(rx);
+                    Some(tx)
                 }
-                Err(e) => log::warn!("relay {relay}: {e}"),
-            }
+                Err(e) => {
+                    log::warn!("relay {url}: {e}");
+                    None
+                }
+            };
+            relay.push(Relay {
+                url: url.clone(),
+                uscita,
+                dal_vivo: false,
+                prossimo_tentativo: adesso() + RIPROVA_RELAY,
+            });
         }
-        let collegati = uscite.len();
+        let collegati = relay.iter().filter(|r| r.uscita.is_some()).count();
         aggiorna(&self.diagnosi, |d| d.relay_collegati = Some(collegati));
-        if uscite.is_empty() {
+        if collegati == 0 {
             return Err(errore("nessun relay Nostr raggiungibile"));
         }
         let io = PeerId(uuid::Uuid::from_bytes(casuale::<16>()));
@@ -138,14 +251,16 @@ impl SignallerBuilder for NostrSignallerBuilder {
             stanza,
             chiavi: Chiavi::nuove(),
             io,
-            uscite: SyncWrapper::new(uscite),
+            relay: SyncWrapper::new(relay),
             entrate: SyncWrapper::new(entrate),
             pendenti: VecDeque::from([PeerEvent::IdAssigned(io)]),
             incontri: Incontri::new(io),
             visti: HashSet::new(),
             diagnosi: self.diagnosi.clone(),
+            notizie: self.notizie.clone(),
         };
-        s.pubblica(&Busta::Annuncio { da: io, a: None }).await?;
+        let annuncio = s.incontri.richiesta(PeerRequest::KeepAlive);
+        s.pubblica(&annuncio).await?;
         Ok(Box::new(s))
     }
 }
@@ -159,54 +274,145 @@ impl NostrSignaller {
             .evento(KIND_SEGNALE, tags, &self.stanza.cifra(&testo), adesso());
         let frame = json!(["EVENT", ev]).to_string();
         // Cancel-safe: matchbox drops `next_message` (which publishes too) whenever a request
-        // comes in, so the senders must never leave `uscite` while we await.
-        let uscite = self.uscite.get_mut();
-        let mut i = 0;
-        while i < uscite.len() {
-            if invia_entro(&mut uscite[i], frame.clone(), ATTESA_RELAY).await {
-                i += 1;
-            } else {
-                drop(uscite.remove(i));
+        // comes in, so the senders stay in their slots while we await.
+        let ora = adesso();
+        for r in self.relay.get_mut().iter_mut() {
+            if let Some(tx) = &mut r.uscita
+                && !invia_entro(tx, frame.clone(), ATTESA_RELAY).await
+            {
+                log::warn!("relay {}: invio fallito", r.url);
+                chiudi_relay(r, ora);
             }
         }
-        if uscite.is_empty() {
-            return Err(errore("tutti i relay Nostr sono caduti"));
-        }
+        // with no relay left the envelope is lost: the pairing retries, and relays reconnect
+        self.conta_relay();
         Ok(())
     }
 
-    /// Decodes a relay frame into an envelope addressed to us (or to everyone).
-    fn decodifica(&mut self, frame: &str) -> Option<Busta> {
-        let v: Value = serde_json::from_str(frame).ok()?;
-        match v.get(0)?.as_str()? {
-            "EVENT" => {}
-            "NOTICE" | "CLOSED" => {
-                log::warn!("relay: {frame}");
-                return None;
-            }
-            // a relay refusing our event (e.g. rate limit)
-            "OK" if v.get(2) == Some(&Value::Bool(false)) => {
-                log::warn!("relay: {frame}");
-                return None;
-            }
-            _ => return None,
+    fn conta_relay(&mut self) {
+        let collegati = self
+            .relay
+            .get_mut()
+            .iter()
+            .filter(|r| r.uscita.is_some())
+            .count();
+        aggiorna(&self.diagnosi, |d| d.relay_collegati = Some(collegati));
+    }
+
+    /// Relays that closed or never answered get a new connection, every [`RIPROVA_RELAY`] s.
+    async fn riconnetti(&mut self) {
+        let ora = adesso();
+        let da_aprire: Vec<(usize, String)> = self
+            .relay
+            .get_mut()
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.uscita.is_none() && ora >= r.prossimo_tentativo)
+            .map(|(i, r)| (i, r.url.clone()))
+            .collect();
+        if da_aprire.is_empty() {
+            return;
         }
-        let ev = v.get(2)?;
-        let id = ev.get("id")?.as_str()?.to_owned();
+        let aperti = futures::future::join_all(
+            da_aprire
+                .iter()
+                .map(|(i, url)| apri_relay(url, *i, &self.stanza)),
+        )
+        .await;
+        for ((i, url), aperto) in da_aprire.into_iter().zip(aperti) {
+            let r = &mut self.relay.get_mut()[i];
+            match aperto {
+                Ok((tx, rx)) => {
+                    log::info!("relay {url}: ricollegato");
+                    r.uscita = Some(tx);
+                    r.dal_vivo = false;
+                    self.entrate.get_mut().push(rx);
+                }
+                Err(_) => r.prossimo_tentativo = ora + RIPROVA_RELAY,
+            }
+        }
+        self.conta_relay();
+    }
+
+    /// Decodes a frame of relay `relay` into a live envelope addressed to us (or to everyone).
+    fn decodifica(&mut self, relay: usize, frame: &str) -> Option<Busta> {
+        let (id, creato, contenuto) = match classifica(frame) {
+            Frame::Evento {
+                id,
+                creato,
+                contenuto,
+            } => (id, creato, contenuto),
+            Frame::FineStorico => {
+                if let Some(r) = self.relay.get_mut().get_mut(relay) {
+                    r.dal_vivo = true;
+                }
+                return None;
+            }
+            Frame::Avviso => {
+                log::warn!("relay: {frame}");
+                return None;
+            }
+            Frame::Altro => return None,
+        };
+        if !self.relay.get_mut().get(relay).is_some_and(|r| r.dal_vivo) {
+            return None; // replayed from storage: possibly from a peer long gone
+        }
         if !self.visti.insert(id) {
             return None; // same event from another relay
         }
         if self.visti.len() > 10_000 {
             self.visti.clear();
         }
-        let testo = self.stanza.decifra(ev.get("content")?.as_str()?)?;
+        if !eta_plausibile(creato, adesso()) {
+            log::debug!("evento con orario lontano: {creato} contro {}", adesso());
+            aggiorna(&self.diagnosi, |d| d.scartati_orario += 1);
+            return None;
+        }
+        let testo = self.stanza.decifra(&contenuto)?;
         let b: Busta = serde_json::from_slice(&testo).ok()?;
-        let (da, a) = match &b {
-            Busta::Annuncio { da, a } => (*da, *a),
-            Busta::Segnale { da, a, .. } => (*da, Some(*a)),
-            Busta::Addio { da } => (*da, None),
+        (b.mittente() != self.io && b.destinatario().is_none_or(|a| a == self.io)).then_some(b)
+    }
+
+    /// Carries out the pairing decisions: events go to matchbox first (they must not be lost
+    /// if this future is dropped while publishing), then envelopes are published.
+    async fn esegui(&mut self, azioni: Vec<Azione>) -> Result<(), SignalingError> {
+        let mut da_pubblicare = vec![];
+        for a in azioni {
+            match a {
+                Azione::Emetti(e) => self.pendenti.push_back(e),
+                Azione::Pubblica(b) => da_pubblicare.push(b),
+            }
+        }
+        for b in da_pubblicare {
+            self.pubblica(&b).await?;
+        }
+        Ok(())
+    }
+
+    /// Link changes and timeouts; `Err` once the session asked to close (after the goodbye).
+    async fn notizie(&mut self) -> Result<(), SignalingError> {
+        let (collegamenti, chiudi) = match self.notizie.lock() {
+            Ok(mut n) => (std::mem::take(&mut n.collegamenti), n.chiudi),
+            Err(_) => (VecDeque::new(), false),
         };
-        (da != self.io && a.is_none_or(|a| a == self.io)).then_some(b)
+        if chiudi {
+            let addio = self.incontri.addio();
+            let _ = self.pubblica(&addio).await;
+            return Err(SignalingError::StreamExhausted);
+        }
+        let ora = adesso();
+        let mut azioni = vec![];
+        for (p, aperto) in collegamenti {
+            if aperto {
+                self.incontri.collegato(p);
+            } else {
+                azioni.extend(self.incontri.perso(p, ora));
+            }
+        }
+        azioni.extend(self.incontri.scadenze(ora));
+        self.esegui(azioni).await?;
+        self.riconnetti().await;
+        Ok(())
     }
 }
 
@@ -214,115 +420,54 @@ impl NostrSignaller {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Signaller for NostrSignaller {
     async fn send(&mut self, request: PeerRequest) -> Result<(), SignalingError> {
-        let b = match request {
-            PeerRequest::Signal { receiver, data } => Busta::Segnale {
-                da: self.io,
-                a: receiver,
-                s: data,
-            },
-            // keep-alives double as presence announcements for late joiners
-            PeerRequest::KeepAlive => Busta::Annuncio {
-                da: self.io,
-                a: None,
-            },
-        };
+        let b = self.incontri.richiesta(request);
         self.pubblica(&b).await
     }
 
     async fn next_message(&mut self) -> Result<PeerEvent, SignalingError> {
         loop {
-            let visti = self.incontri.noti.len();
+            let visti = self.incontri.visti();
             aggiorna(&self.diagnosi, |d| d.peer_visti = visti);
             if let Some(e) = self.pendenti.pop_front() {
                 return Ok(e);
             }
-            let frame = self
-                .entrate
-                .get_mut()
-                .next()
-                .await
-                .ok_or(SignalingError::StreamExhausted)?;
-            match self.decodifica(&frame) {
-                Some(Busta::Annuncio { da, .. }) => match self.incontri.annuncio(da) {
-                    Reazione::Offri => return Ok(PeerEvent::NewPeer(da)),
-                    Reazione::Chiedi => {
-                        let io = self.io;
-                        self.pubblica(&Busta::Annuncio {
-                            da: io,
-                            a: Some(da),
-                        })
-                        .await?;
-                    }
-                    Reazione::Niente => {}
-                },
-                Some(Busta::Segnale { da, s, .. }) => {
-                    self.incontri.segnale(da);
-                    return Ok(PeerEvent::Signal {
-                        sender: da,
-                        data: s,
-                    });
-                }
-                Some(Busta::Addio { da }) if self.incontri.noti.remove(&da) => {
-                    return Ok(PeerEvent::PeerLeft(da));
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-/// Who meets whom: for each pair the lower id offers (matchbox's `NewPeer`), the higher one
-/// tells it to. Any envelope may be lost, so the higher one keeps asking on every announcement
-/// of the other until a signal from it arrives.
-struct Incontri {
-    io: PeerId,
-    /// Peers seen in the room.
-    noti: HashSet<PeerId>,
-    /// Peers we made an offer to.
-    offerti: HashSet<PeerId>,
-    /// Peers that sent us a WebRTC signal (their offer reached us).
-    segnalati: HashSet<PeerId>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum Reazione {
-    /// Make the WebRTC offer.
-    Offri,
-    /// Send a directed announcement so that the other side offers.
-    Chiedi,
-    Niente,
-}
-
-impl Incontri {
-    fn new(io: PeerId) -> Incontri {
-        Incontri {
-            io,
-            noti: HashSet::new(),
-            offerti: HashSet::new(),
-            segnalati: HashSet::new(),
-        }
-    }
-
-    /// An announcement (broadcast or directed to us) from `da`.
-    fn annuncio(&mut self, da: PeerId) -> Reazione {
-        self.noti.insert(da);
-        if self.io < da {
-            if self.offerti.insert(da) {
-                Reazione::Offri
+            let mut un_secondo =
+                futures_timer::Delay::new(std::time::Duration::from_secs(1)).fuse();
+            // with every relay closed there is nothing to read: only the housekeeping, which
+            // reconnects them (an empty `SelectAll` would end at once and spin)
+            let prossimo = if self.entrate.get_mut().is_empty() {
+                un_secondo.await;
+                None
             } else {
-                Reazione::Niente
+                futures::select! {
+                    f = self.entrate.get_mut().next().fuse() => f,
+                    _ = un_secondo => None,
+                }
+            };
+            match prossimo {
+                Some((relay, None)) => {
+                    let r = &mut self.relay.get_mut()[relay];
+                    log::warn!("relay {}: connessione chiusa", r.url);
+                    chiudi_relay(r, adesso());
+                    self.conta_relay();
+                }
+                Some((relay, Some(frame))) => {
+                    if let Some(b) = self.decodifica(relay, &frame) {
+                        let azioni = self.incontri.busta(b, adesso());
+                        self.esegui(azioni).await?;
+                    }
+                }
+                None => self.notizie().await?,
             }
-        } else if self.segnalati.contains(&da) {
-            Reazione::Niente
-        } else {
-            Reazione::Chiedi
         }
     }
+}
 
-    fn segnale(&mut self, da: PeerId) {
-        self.noti.insert(da);
-        self.segnalati.insert(da);
-    }
+/// Marks a relay closed; it is tried again after [`RIPROVA_RELAY`] seconds.
+fn chiudi_relay(r: &mut Relay, ora: u64) {
+    r.uscita = None;
+    r.dal_vivo = false;
+    r.prossimo_tentativo = ora + RIPROVA_RELAY;
 }
 
 /// How long to wait for each relay before giving up on it.
@@ -330,7 +475,6 @@ const ATTESA_RELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Sends a frame to one relay; false when the relay failed or stalled (then it is dropped).
 async fn invia_entro(tx: &mut ws::Uscita, frame: String, attesa: std::time::Duration) -> bool {
-    use futures::FutureExt;
     futures::select! {
         r = tx.send(frame).fuse() => r.is_ok(),
         _ = futures_timer::Delay::new(attesa).fuse() => false,
@@ -341,7 +485,6 @@ async fn connetti_entro(
     url: &str,
     attesa: std::time::Duration,
 ) -> Result<(ws::Uscita, ws::Entrata), String> {
-    use futures::FutureExt;
     futures::select! {
         c = ws::connetti(url).fuse() => c,
         _ = futures_timer::Delay::new(attesa).fuse() => Err("timeout".into()),
@@ -352,53 +495,55 @@ async fn connetti_entro(
 mod tests {
     use super::*;
 
-    fn id(n: u8) -> PeerId {
-        PeerId(uuid::Uuid::from_bytes([n; 16]))
+    #[test]
+    fn la_stanza_si_deriva_una_volta() {
+        let b = NostrSignallerBuilder::default();
+        let prima = b.stanza("ABCD234567");
+        let t = std::time::Instant::now();
+        assert_eq!(b.stanza("abcd-2345 67").etichetta, prima.etichetta);
+        assert!(t.elapsed() < std::time::Duration::from_millis(5), "cached");
+        assert_eq!(
+            NostrSignallerBuilder::default()
+                .stanza("ABCD234567")
+                .etichetta,
+            prima.etichetta,
+            "two builders, same room"
+        );
+        assert_ne!(b.stanza("ZZZZ234567").etichetta, prima.etichetta);
     }
 
-    /// A host waiting in the room and a joiner, exchanging announcements over relays that lose
-    /// the first `persi` directed announcements. Returns the round in which the offer is made.
-    fn incontro(host: PeerId, ospite: PeerId, mut persi: usize) -> Option<usize> {
-        let mut p = [Incontri::new(host), Incontri::new(ospite)];
-        for giro in 0..10 {
-            // each side announces itself (join, then every keep-alive) and the other reacts
-            for (chi, altro) in [(1, 0), (0, 1)] {
-                let da = p[chi].io;
-                match p[altro].annuncio(da) {
-                    Reazione::Offri => return Some(giro),
-                    Reazione::Chiedi if persi > 0 => persi -= 1,
-                    // the directed announcement arrives: the other side (lower id) offers
-                    Reazione::Chiedi => {
-                        let io = p[altro].io;
-                        if p[chi].annuncio(io) == Reazione::Offri {
-                            return Some(giro);
-                        }
-                    }
-                    Reazione::Niente => {}
-                }
+    #[test]
+    fn frame_dei_relay() {
+        let ev = r#"["EVENT","bazzica",{"id":"ab","created_at":1700000000,"content":"xyz","kind":25319}]"#;
+        assert_eq!(
+            classifica(ev),
+            Frame::Evento {
+                id: "ab".into(),
+                creato: 1_700_000_000,
+                contenuto: "xyz".into()
             }
-        }
-        None
+        );
+        assert_eq!(classifica(r#"["EOSE","bazzica"]"#), Frame::FineStorico);
+        assert_eq!(classifica(r#"["NOTICE","slow down"]"#), Frame::Avviso);
+        assert_eq!(classifica(r#"["CLOSED","bazzica","bye"]"#), Frame::Avviso);
+        assert_eq!(
+            classifica(r#"["OK","ab",false,"rate-limited"]"#),
+            Frame::Avviso
+        );
+        assert_eq!(classifica(r#"["OK","ab",true,""]"#), Frame::Altro);
+        assert_eq!(
+            classifica(r#"["EVENT","bazzica",{"id":"ab"}]"#),
+            Frame::Altro
+        );
+        assert_eq!(classifica("non json"), Frame::Altro);
     }
 
     #[test]
-    fn la_coppia_si_incontra_anche_se_si_perdono_buste() {
-        for (host, ospite) in [(id(1), id(2)), (id(2), id(1))] {
-            assert_eq!(incontro(host, ospite, 0), Some(0));
-            assert!(incontro(host, ospite, 3).is_some(), "{host} {ospite}");
-        }
-    }
-
-    #[test]
-    fn una_sola_offerta_per_peer() {
-        let mut basso = Incontri::new(id(1));
-        assert_eq!(basso.annuncio(id(2)), Reazione::Offri);
-        assert_eq!(basso.annuncio(id(2)), Reazione::Niente);
-        let mut alto = Incontri::new(id(2));
-        assert_eq!(alto.annuncio(id(1)), Reazione::Chiedi);
-        assert_eq!(alto.annuncio(id(1)), Reazione::Chiedi);
-        alto.segnale(id(1));
-        assert_eq!(alto.annuncio(id(1)), Reazione::Niente);
-        assert_eq!(alto.noti.len(), 1);
+    fn orologi_diversi_ma_plausibili() {
+        let ora = 1_700_000_000;
+        assert!(eta_plausibile(ora - 60, ora), "a minute behind");
+        assert!(eta_plausibile(ora + 120, ora), "two minutes ahead");
+        assert!(!eta_plausibile(ora - 20 * 60, ora));
+        assert!(!eta_plausibile(ora + 20 * 60, ora));
     }
 }

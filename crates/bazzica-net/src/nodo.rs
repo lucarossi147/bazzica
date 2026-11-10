@@ -10,6 +10,19 @@
 //! If the host leaves, the first connected participant in join order takes over with a higher
 //! `epoca`; peers that are ahead hand it their replica, peers that are behind catch up.
 //!
+//! Untrusted input: anything decoded from the network may be corrupt or forged, and must not
+//! crash the node or its UI. Snapshots are checked ([`Tavolo::valida`]: every card once, seats
+//! in range) before adoption; entries naming a seat that does not exist are refused; wire seats
+//! are checked before any arithmetic ([`posto`]); a peer holding a replica follows a host claim,
+//! an entry or a snapshot of a new epoch only from a participant of the table and at most
+//! `SALTO_MAX_EPOCA` epochs ahead. Identities are still self-declared (messages are not signed).
+//!
+//! Requests: a follower keeps each request until the host acknowledges it (`Ricevuta`, sent
+//! after the entry) or refuses it (`Rifiuto`), and resends it with the same id to the new host
+//! after a takeover or after [`Config::attesa_richiesta_ms`]. The host ignores ids it already
+//! handled for that session (acknowledging them again). A request identical to a pending one
+//! (a double tap) is not sent again, and a move that is no longer legal locally is dropped.
+//!
 //! Elections: candidates are peers known to hold a replica (`Ciao.replica`, refreshed by
 //! `HoReplica` when a peer gets its first snapshot). A peer claims only with a strict majority
 //! of the participants the host last reported connected (`Presenti`, sent by the host whenever
@@ -44,10 +57,16 @@ use bazzica_core::bots::{Agent, HeuristicAgent};
 use bazzica_core::game::compagno;
 use bazzica_core::{Azione, Evento, Fase, Mulberry32, Seat};
 
-use crate::protocollo::{Effimero, Messaggio, Regia, Richiesta, Sessione, VERSIONE_PROTOCOLLO};
-use crate::tavolo::{
-    Errore, FRASI, IdGiocatore, Impostazioni, Partecipante, StatoTavolo, Tavolo, TipoTimer, Voce,
+use crate::protocollo::{
+    Effimero, Messaggio, Regia, Richiesta, Sessione, TimerInCorso, VERSIONE_PROTOCOLLO,
 };
+use crate::tavolo::{
+    Errore, FRASI, IdGiocatore, Impostazioni, Partecipante, Posto, StatoTavolo, Tavolo, TipoTimer,
+    Voce, normalizza, permesso,
+};
+
+/// How far ahead of ours an epoch may be (a host claim, an entry, a snapshot).
+const SALTO_MAX_EPOCA: u64 = 16;
 
 /// Why a superseded node refuses everything.
 const SOSTITUITO: &str = "Questa partita è aperta in un'altra scheda";
@@ -64,6 +83,10 @@ pub struct Config {
     pub attesa_istantanea_ms: u64,
     /// How long a new host waits for its peers' `Allineato` before sequencing, in ms.
     pub attesa_allineamento_ms: u64,
+    /// How long a request may go unacknowledged before it is sent again, in ms.
+    pub attesa_richiesta_ms: u64,
+    /// How long a seated human must be away before a bot may take their seat, in ms.
+    pub attesa_sostituzione_ms: u64,
 }
 
 impl Default for Config {
@@ -74,6 +97,8 @@ impl Default for Config {
             pausa_palo: 3000,
             attesa_istantanea_ms: 3000,
             attesa_allineamento_ms: 2000,
+            attesa_richiesta_ms: 3000,
+            attesa_sostituzione_ms: 60_000,
         }
     }
 }
@@ -145,6 +170,14 @@ enum InCoda<P> {
     Entra(Partecipante),
 }
 
+/// A request of the local user sent to the host and not acknowledged yet.
+#[derive(Clone, Debug)]
+struct Pendente {
+    richiesta: Richiesta,
+    /// When it was last sent, in ms.
+    inviata: u64,
+}
+
 /// A snapshot asked for and not received yet.
 #[derive(Clone, Debug)]
 struct RichiestaIstantanea<P> {
@@ -179,6 +212,8 @@ pub struct Nodo<P> {
     sessione: Sessione,
     /// A newer session of our identity took over: this node stops acting.
     sostituito: bool,
+    /// Since when each seated human has been away (ms), by this node's observation.
+    assenti_dal: BTreeMap<IdGiocatore, u64>,
     /// Who the host last reported connected (itself included): elections need a strict
     /// majority of it. Empty until the first report.
     presenti: BTreeSet<IdGiocatore>,
@@ -191,12 +226,18 @@ pub struct Nodo<P> {
     /// Connected peers and, once they said hello, who they are.
     peers: BTreeMap<P, Option<Remoto>>,
     rid: u64,
+    /// Requests sent to the host and not acknowledged, by request id.
+    pendenti: BTreeMap<u64, Pendente>,
     attesa_istantanea: Option<RichiestaIstantanea<P>>,
     // host only
+    /// Last request id handled per session of each participant, to ignore duplicates.
+    ultimi_rid: BTreeMap<Regia, u64>,
     /// Set from a won election until the peers answered: nothing is sequenced meanwhile.
     allineamento: Option<Allineamento<P>>,
     piano: Option<(u64, u64, Piano)>,
     timer: Option<(ChiaveTimer, u64)>,
+    /// Follower: the host's timer as of its last entry (kind, seat, local deadline in ms).
+    timer_remoto: Option<(TipoTimer, Option<Seat>, u64)>,
     ultimo_palo: [Option<u64>; 4],
     uscite: Vec<Uscita<P>>,
     /// Protocol version of a peer we had to ignore (it runs another build of the app).
@@ -230,6 +271,7 @@ impl<P: Clone + Ord> Nodo<P> {
             },
             sostituito: false,
             presenti: BTreeSet::new(),
+            assenti_dal: BTreeMap::new(),
             tavolo: None,
             log: vec![],
             log_base: 0,
@@ -237,10 +279,13 @@ impl<P: Clone + Ord> Nodo<P> {
             host: None,
             peers: BTreeMap::new(),
             rid: 0,
+            pendenti: BTreeMap::new(),
+            ultimi_rid: BTreeMap::new(),
             attesa_istantanea: None,
             allineamento: None,
             piano: None,
             timer: None,
+            timer_remoto: None,
             ultimo_palo: [None; 4],
             uscite: vec![],
             versione_altrui: None,
@@ -320,6 +365,27 @@ impl<P: Clone + Ord> Nodo<P> {
         t.umani().into_iter().filter(|id| !c.contains(id)).collect()
     }
 
+    /// Seated humans away long enough for a bot to take their seat.
+    pub fn sostituibili(&self) -> Vec<IdGiocatore> {
+        self.disconnessi()
+            .into_iter()
+            .filter(|id| {
+                self.assenti_dal
+                    .get(id)
+                    .is_some_and(|&dal| self.ora >= dal + self.config.attesa_sostituzione_ms)
+            })
+            .collect()
+    }
+
+    /// Keeps track of since when each seated human is away.
+    fn aggiorna_assenze(&mut self) {
+        let assenti: BTreeSet<IdGiocatore> = self.disconnessi().into_iter().collect();
+        self.assenti_dal.retain(|id, _| assenti.contains(id));
+        for id in assenti {
+            self.assenti_dal.entry(id).or_insert(self.ora);
+        }
+    }
+
     pub fn in_pausa(&self) -> bool {
         self.tavolo
             .as_ref()
@@ -327,9 +393,23 @@ impl<P: Clone + Ord> Nodo<P> {
             && !self.disconnessi().is_empty()
     }
 
-    /// Running turn timer: (kind, seat, deadline in ms). Only known on the host.
+    /// Running turn timer: (kind, seat, deadline in ms on this node's clock). Followers learn it
+    /// from the host's entries.
     pub fn timer(&self) -> Option<(TipoTimer, Option<Seat>, u64)> {
-        self.timer.as_ref().map(|(k, t)| (k.tipo, k.seat, *t))
+        if self.e_host() {
+            self.timer.as_ref().map(|(k, t)| (k.tipo, k.seat, *t))
+        } else {
+            self.timer_remoto
+        }
+    }
+
+    /// The host's running timer, as sent with its entries.
+    fn timer_in_corso(&self) -> Option<TimerInCorso> {
+        self.timer.as_ref().map(|(k, t)| TimerInCorso {
+            tipo: k.tipo,
+            seat: k.seat,
+            resto_ms: t.saturating_sub(self.ora),
+        })
     }
 
     /// When the driver must call [`Nodo::tick`] next.
@@ -343,6 +423,10 @@ impl<P: Clone + Ord> Nodo<P> {
             self.timer.as_ref().map(|t| t.1),
             istantanea,
             self.allineamento.as_ref().map(|a| a.scadenza),
+            self.pendenti
+                .values()
+                .map(|x| x.inviata + self.config.attesa_richiesta_ms)
+                .min(),
         ]
         .into_iter()
         .flatten()
@@ -405,6 +489,7 @@ impl<P: Clone + Ord> Nodo<P> {
     pub fn disconnesso(&mut self, ora: u64, p: &P) {
         self.orologio(ora);
         self.scollega(p);
+        self.aggiorna_assenze();
     }
 
     /// Forgets peer `p` (gone, or superseded by a newer session of the same identity).
@@ -439,10 +524,12 @@ impl<P: Clone + Ord> Nodo<P> {
 
     pub fn tick(&mut self, ora: u64) {
         self.orologio(ora);
+        self.aggiorna_assenze();
         if self.sostituito {
             return;
         }
         self.ripeti_istantanea();
+        self.ripeti_richieste(false);
         if self
             .allineamento
             .as_ref()
@@ -479,21 +566,69 @@ impl<P: Clone + Ord> Nodo<P> {
         } else if self.e_host() {
             let id = self.io.id.clone();
             self.richiesta_al_host(None, self.rid, id, r);
-        } else if let Some(p) = self.peer_host() {
-            self.invia(
-                Destinatario::Uno(p),
-                Messaggio::Richiesta {
-                    rid: self.rid,
-                    richiesta: r,
-                },
-            );
-        } else {
+        } else if self.host.is_none() {
             self.uscite.push(Uscita::Rifiutata {
                 motivo: "Nessun host raggiungibile".into(),
             });
+        } else if let Some((&rid, _)) = self.pendenti.iter().find(|(_, x)| x.richiesta == r) {
+            // a double tap: the same request is already on its way
+            return rid;
+        } else {
+            // sent now if the host is reachable, else when it is (see `ripeti_richieste`)
+            self.pendenti.insert(
+                self.rid,
+                Pendente {
+                    richiesta: r.clone(),
+                    inviata: self.ora,
+                },
+            );
+            if let Some(p) = self.peer_host() {
+                self.invia(
+                    Destinatario::Uno(p),
+                    Messaggio::Richiesta {
+                        rid: self.rid,
+                        richiesta: r,
+                    },
+                );
+            }
         }
         self.controlla();
         self.rid
+    }
+
+    /// Requests sent to the host and not acknowledged yet (for an "invio…" hint in the UI).
+    pub fn richieste_in_corso(&self) -> usize {
+        self.pendenti.len()
+    }
+
+    /// Sends the pending requests again (same ids) to the current host: all of them when
+    /// `tutte`, else those unacknowledged for [`Config::attesa_richiesta_ms`]. Drops the ones
+    /// that no longer make sense (a move that is not legal any more, e.g. the timer played it).
+    fn ripeti_richieste(&mut self, tutte: bool) {
+        let superate: Vec<u64> = self
+            .pendenti
+            .iter()
+            .filter(|(_, x)| !ancora_sensata(self.tavolo.as_ref(), &x.richiesta))
+            .map(|(rid, _)| *rid)
+            .collect();
+        for rid in superate {
+            self.pendenti.remove(&rid);
+        }
+        let Some(p) = self.peer_host() else { return };
+        let (ora, attesa) = (self.ora, self.config.attesa_richiesta_ms);
+        let mut da_mandare = vec![];
+        for (rid, x) in self.pendenti.iter_mut() {
+            if tutte || ora >= x.inviata + attesa {
+                x.inviata = ora;
+                da_mandare.push(Messaggio::Richiesta {
+                    rid: *rid,
+                    richiesta: x.richiesta.clone(),
+                });
+            }
+        }
+        for m in da_mandare {
+            self.invia(Destinatario::Uno(p.clone()), m);
+        }
     }
 
     /// A cosmetic effect of the local user (phrase, card drag): sent to everyone directly.
@@ -514,6 +649,7 @@ impl<P: Clone + Ord> Nodo<P> {
     pub fn ricevi(&mut self, ora: u64, p: P, msg: Messaggio) {
         self.orologio(ora);
         self.ricevi_messaggio(p, msg);
+        self.aggiorna_assenze();
         self.controlla();
     }
 
@@ -562,17 +698,31 @@ impl<P: Clone + Ord> Nodo<P> {
         match msg {
             Messaggio::Ciao { .. } | Messaggio::Sostituito => unreachable!(),
             Messaggio::Richiesta { rid, richiesta } => {
-                if self.e_host() {
-                    self.richiesta_al_host(Some(p), rid, da, richiesta);
+                if !self.e_host() {
+                    return;
                 }
+                // a resend of a request already handled: acknowledge it again, nothing else
+                let ultimo = self.ultimi_rid.entry(regia).or_default();
+                if rid <= *ultimo {
+                    return self.invia(Destinatario::Uno(p), Messaggio::Ricevuta { rid });
+                }
+                *ultimo = rid;
+                self.richiesta_al_host(Some(p), rid, da, richiesta);
             }
-            Messaggio::Rifiuto { motivo, .. } => self.uscite.push(Uscita::Rifiutata { motivo }),
+            Messaggio::Ricevuta { rid } => {
+                self.pendenti.remove(&rid);
+            }
+            Messaggio::Rifiuto { rid, motivo } => {
+                self.pendenti.remove(&rid);
+                self.uscite.push(Uscita::Rifiutata { motivo });
+            }
             Messaggio::Voce {
                 epoca,
                 n,
                 voce,
                 impronta,
-            } => self.voce_ricevuta(p, regia, epoca, n, voce, impronta),
+                timer,
+            } => self.voce_ricevuta(p, regia, epoca, n, voce, impronta, timer),
             Messaggio::Istantanea {
                 epoca,
                 host,
@@ -680,11 +830,10 @@ impl<P: Clone + Ord> Nodo<P> {
 
     /// Records a participant that said hello, if it is new or changed (host only).
     fn entra(&mut self, io: Partecipante) {
-        if self
-            .tavolo
-            .as_ref()
-            .is_some_and(|t| t.partecipante(&io.id) != Some(&io))
-        {
+        if self.tavolo.as_ref().is_some_and(|t| {
+            let attuale = t.partecipante(&io.id);
+            attuale != Some(&normalizza(&io, attuale, t.partecipanti.len()))
+        }) {
             let _ = self.aggiungi(Voce::Entra(io));
         }
     }
@@ -707,14 +856,15 @@ impl<P: Clone + Ord> Nodo<P> {
             });
             return;
         }
-        if let Err(e) = self.esegui(&id, richiesta) {
-            match da {
-                Some(p) => self.invia(
-                    Destinatario::Uno(p),
-                    Messaggio::Rifiuto { rid, motivo: e.0 },
-                ),
-                None => self.uscite.push(Uscita::Rifiutata { motivo: e.0 }),
-            }
+        // after the entry, so the requester sees it before the acknowledgement
+        match (self.esegui(&id, richiesta), da) {
+            (Ok(()), Some(p)) => self.invia(Destinatario::Uno(p), Messaggio::Ricevuta { rid }),
+            (Ok(()), None) => {}
+            (Err(e), Some(p)) => self.invia(
+                Destinatario::Uno(p),
+                Messaggio::Rifiuto { rid, motivo: e.0 },
+            ),
+            (Err(e), None) => self.uscite.push(Uscita::Rifiutata { motivo: e.0 }),
         }
     }
 
@@ -761,13 +911,27 @@ impl<P: Clone + Ord> Nodo<P> {
         self.ripianifica();
     }
 
-    fn voce_ricevuta(&mut self, p: P, da: Regia, epoca: u64, n: u64, voce: Voce, impronta: String) {
+    #[allow(clippy::too_many_arguments)] // the fields of `Messaggio::Voce`, plus who sent it
+    fn voce_ricevuta(
+        &mut self,
+        p: P,
+        da: Regia,
+        epoca: u64,
+        n: u64,
+        voce: Voce,
+        impronta: String,
+        timer: Option<TimerInCorso>,
+    ) {
         if epoca < self.epoca || (epoca == self.epoca && self.host.as_ref() != Some(&da)) {
+            return;
+        }
+        if !self.epoca_plausibile(epoca, &da.id) {
             return;
         }
         if epoca > self.epoca {
             self.segui(epoca, da);
         }
+        self.timer_remoto = timer.map(|t| (t.tipo, t.seat, self.ora + t.resto_ms));
         let Some(t) = &mut self.tavolo else {
             return self.chiedi(p, 0);
         };
@@ -797,6 +961,15 @@ impl<P: Clone + Ord> Nodo<P> {
             // diverged or rejected: the host's replica wins
             _ => self.chiedi(p, 0),
         }
+    }
+
+    /// Whether `chi` may lead epoch `epoca`: a participant of our replica, and no wild jump
+    /// ahead (a peer cannot make itself host forever with `u64::MAX`). Without a replica we
+    /// cannot judge, and a table may well be at a high epoch after many takeovers.
+    fn epoca_plausibile(&self, epoca: u64, chi: &str) -> bool {
+        self.tavolo.as_ref().is_none_or(|t| {
+            epoca <= self.epoca.saturating_add(SALTO_MAX_EPOCA) && t.partecipante(chi).is_some()
+        })
     }
 
     /// Asks `p` for the entries from `da` on, or for a snapshot when `da` is 0.
@@ -842,6 +1015,9 @@ impl<P: Clone + Ord> Nodo<P> {
     }
 
     fn istantanea_ricevuta(&mut self, epoca: u64, host: Regia, tavolo: Tavolo) {
+        if tavolo.valida().is_err() || !self.epoca_plausibile(epoca, &host.id) {
+            return; // corrupt or forged: it must not crash us later
+        }
         // a snapshot naming another session of our id never makes us host
         if self.e_host() && host == self.regia() {
             // a follower that was ahead of us when we took over
@@ -865,6 +1041,9 @@ impl<P: Clone + Ord> Nodo<P> {
     }
 
     fn host_ricevuto(&mut self, p: P, da: Regia, epoca: u64, n: u64) {
+        if !self.epoca_plausibile(epoca, &da.id) {
+            return;
+        }
         let accetta = epoca > self.epoca
             || (epoca == self.epoca
                 && self
@@ -937,6 +1116,7 @@ impl<P: Clone + Ord> Nodo<P> {
                     n: da + i as u64,
                     voce: voce.clone(),
                     impronta: impronta.clone(),
+                    timer: self.timer_in_corso(),
                 })
                 .collect();
             for m in voci {
@@ -967,12 +1147,13 @@ impl<P: Clone + Ord> Nodo<P> {
                 *seat
             }
             Effimero::Striscia { seat, verso } => {
-                if *verso != (*seat + 3) % 4 {
+                let seat = posto(*seat).ok_or_else(|| Errore("Posto inesistente".into()))?;
+                if *verso != (seat + 3) % 4 {
                     return Err(Errore(
                         "Si striscia solo verso il giocatore precedente".into(),
                     ));
                 }
-                *seat
+                seat
             }
         };
         if !t.posti_di(id).contains(&seat) {
@@ -1003,6 +1184,7 @@ impl<P: Clone + Ord> Nodo<P> {
 
     /// Follows `host` from `epoca` on (stepping down if we were host).
     fn segui(&mut self, epoca: u64, host: Regia) {
+        let nuovo = self.host.as_ref() != Some(&host);
         if (epoca, Some(&host)) != (self.epoca, self.host.as_ref()) {
             self.attesa_istantanea = None;
         }
@@ -1011,8 +1193,24 @@ impl<P: Clone + Ord> Nodo<P> {
         if !self.e_host() {
             self.piano = None;
             self.timer = None;
-            // queued requests are dropped: their senders retry with the new host
-            self.allineamento = None;
+            // queued requests of others are dropped (their senders retry with the new host);
+            // our own become pending again
+            let in_coda = self.allineamento.take().map(|a| a.in_coda);
+            for lavoro in in_coda.into_iter().flatten() {
+                if let InCoda::Richiesta {
+                    da: None,
+                    rid,
+                    richiesta,
+                    ..
+                } = lavoro
+                {
+                    let inviata = self.ora;
+                    self.pendenti.insert(rid, Pendente { richiesta, inviata });
+                }
+            }
+            if nuovo {
+                self.ripeti_richieste(true);
+            }
         }
     }
 
@@ -1053,7 +1251,16 @@ impl<P: Clone + Ord> Nodo<P> {
                     .collect(),
                 scadenza: self.ora + self.config.attesa_allineamento_ms,
                 rapporti: vec![],
-                in_coda: vec![],
+                // our own pending requests are now ours to sequence
+                in_coda: std::mem::take(&mut self.pendenti)
+                    .into_iter()
+                    .map(|(rid, x)| InCoda::Richiesta {
+                        da: None,
+                        rid,
+                        id: self.io.id.clone(),
+                        richiesta: x.richiesta,
+                    })
+                    .collect(),
             });
             self.invia(
                 Destinatario::Tutti,
@@ -1090,6 +1297,7 @@ impl<P: Clone + Ord> Nodo<P> {
         }
         self.attesa_istantanea = None;
         self.uscite.push(Uscita::Sincronizzata);
+        self.timer_remoto = None;
         self.controlla();
     }
 
@@ -1126,17 +1334,23 @@ impl<P: Clone + Ord> Nodo<P> {
         let impronta = t.impronta();
         let n = t.n;
         self.log.push((voce.clone(), impronta.clone()));
+        self.uscite.push(Uscita::Applicata {
+            voce: voce.clone(),
+            eventi,
+        });
+        // the timer of the new state travels with the entry
+        self.ripianifica();
+        let timer = self.timer_in_corso();
         self.invia(
             Destinatario::Tutti,
             Messaggio::Voce {
                 epoca: self.epoca,
                 n,
-                voce: voce.clone(),
+                voce,
                 impronta,
+                timer,
             },
         );
-        self.uscite.push(Uscita::Applicata { voce, eventi });
-        self.ripianifica();
         Ok(())
     }
 
@@ -1146,18 +1360,15 @@ impl<P: Clone + Ord> Nodo<P> {
             .tavolo
             .as_ref()
             .ok_or_else(|| Errore("Nessun tavolo".into()))?;
+        let creatore_presente = self.connessi().contains(t.creatore());
+        let host = self.host.as_ref().map(|h| h.id.as_str());
+        permesso(t, id, &r, creatore_presente, host)?;
         let voce = match r {
             Richiesta::Siedi { posto } => Voce::Siedi {
                 id: id.clone(),
                 posto,
             },
-            Richiesta::Alzati { posto } => {
-                let tuo = t.posti_di(id).contains(&posto);
-                if !(tuo || t.e_bot(posto) || id == t.creatore()) {
-                    return Err(Errore("Non puoi liberare questo posto".into()));
-                }
-                Voce::Alzati { posto }
-            }
+            Richiesta::Alzati { posto } => Voce::Alzati { posto },
             Richiesta::Bot { posto, aggiungi } => Voce::Bot { posto, aggiungi },
             Richiesta::Imposta(imp) => Voce::Imposta(imp),
             Richiesta::Avvia => Voce::Avvia {
@@ -1173,12 +1384,9 @@ impl<P: Clone + Ord> Nodo<P> {
                         "Partita in pausa: in attesa di riconnessione".into(),
                     ));
                 }
-                let seat = a
-                    .seat()
-                    .ok_or_else(|| Errore("Azione riservata al sistema".into()))?;
-                if !t.posti_di(id).contains(&seat) {
-                    return Err(Errore("Non controlli questo posto".into()));
-                }
+                let Some(seat) = a.seat() else {
+                    return Err(Errore("Azione riservata al sistema".into()));
+                };
                 if let Azione::ChePalo { .. } = a {
                     if st.fase == Fase::Scambio {
                         return Err(Errore("Durante lo scambio non si può parlare".into()));
@@ -1192,22 +1400,28 @@ impl<P: Clone + Ord> Nodo<P> {
                 Voce::Azione(a)
             }
             Richiesta::Prosegui => {
-                if !t.umani().contains(id) {
-                    return Err(Errore("Non sei seduto al tavolo".into()));
-                }
                 if t.ack.contains(id) {
                     return Ok(());
                 }
                 Voce::Prosegui { id: id.clone() }
             }
-            Richiesta::Termina => {
-                if id != t.creatore() && !t.umani().contains(id) {
+            Richiesta::Termina => Voce::Termina { da: id.clone() },
+            Richiesta::Sostituisci { posto } => {
+                let assente = match t.posti.get(usize::from(posto)) {
+                    Some(Some(Posto::Umano { id: a })) => a.clone(),
+                    _ => return Err(Errore("Nessun giocatore da sostituire".into())),
+                };
+                if !self.sostituibili().contains(&assente) {
                     return Err(Errore(
-                        "Solo chi è seduto al tavolo può terminare la partita".into(),
+                        "Aspetta ancora un po': potrebbe ricollegarsi".into(),
                     ));
                 }
-                Voce::Termina { da: id.clone() }
+                Voce::Sostituisci { posto }
             }
+            Richiesta::Riprendi { posto } => Voce::Riprendi {
+                posto,
+                id: id.clone(),
+            },
         };
         self.aggiungi(voce)
     }
@@ -1264,6 +1478,7 @@ impl<P: Clone + Ord> Nodo<P> {
                 let secondi = match k.tipo {
                     TipoTimer::Scambio => t.impostazioni.timer_scambio,
                     TipoTimer::Giocata => t.impostazioni.timer_giocata,
+                    TipoTimer::FineMano => t.impostazioni.timer_fine_mano,
                 };
                 (k, self.ora + u64::from(secondi) * 1000)
             });
@@ -1303,6 +1518,8 @@ impl<P: Clone + Ord> Nodo<P> {
         let mut rng = Mulberry32::new(self.seme_decisione());
         let mut azioni = vec![];
         match k.tipo {
+            // the summary waited long enough: everyone counts as having seen it (no actions)
+            TipoTimer::FineMano => {}
             TipoTimer::Scambio => {
                 // whoever has not passed yet passes a random card
                 for s in 0..4 {
@@ -1334,7 +1551,7 @@ impl<P: Clone + Ord> Nodo<P> {
                 }
             }
         }
-        if azioni.is_empty() {
+        if azioni.is_empty() && k.tipo != TipoTimer::FineMano {
             return self.ripianifica();
         }
         self.aggiungi(Voce::Scaduto {
@@ -1373,6 +1590,15 @@ fn bot_da_far_agire(t: &Tavolo) -> Option<(Seat, bool)> {
 fn chiave_timer(t: &Tavolo) -> Option<ChiaveTimer> {
     let st = t.partita.as_ref()?;
     let imp = &t.impostazioni;
+    if st.fase == Fase::FineMano && imp.timer_fine_mano > 0 && !t.umani().is_subset(&t.ack) {
+        return Some(ChiaveTimer {
+            tipo: TipoTimer::FineMano,
+            mano: st.mano_n,
+            turno: st.turno,
+            giocate: 0,
+            seat: None,
+        });
+    }
     if st.fase == Fase::Scambio && imp.timer_scambio > 0 {
         return Some(ChiaveTimer {
             tipo: TipoTimer::Scambio,
@@ -1392,6 +1618,22 @@ fn chiave_timer(t: &Tavolo) -> Option<ChiaveTimer> {
         });
     }
     None
+}
+
+/// A seat number from the wire, if it names a seat.
+pub fn posto(s: u8) -> Option<Seat> {
+    (s < 4).then_some(s)
+}
+
+/// Whether a pending request is still worth sending: a move must still be legal locally.
+fn ancora_sensata(t: Option<&Tavolo>, r: &Richiesta) -> bool {
+    match r {
+        Richiesta::Azione(a) => t
+            .and_then(|t| t.partita.as_ref())
+            .zip(a.seat())
+            .is_some_and(|(st, s)| st.legal_actions(s).contains(a)),
+        _ => true,
+    }
 }
 
 /// Whether `raggiunti` holds a strict majority of `vista` (an empty view gives no constraint).

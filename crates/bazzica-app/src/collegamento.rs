@@ -30,6 +30,8 @@ pub struct Fatti {
     pub relay_totali: usize,
     pub relay_collegati: Option<usize>,
     pub peer_visti: usize,
+    /// Live events ignored for a time far from this device's clock.
+    pub scartati_orario: usize,
     pub peer_collegati: usize,
     pub versione_altrui: Option<u32>,
     pub secondi: u64,
@@ -67,6 +69,11 @@ pub fn passi(f: &Fatti) -> Vec<Passo> {
     if f.peer_visti == 0 {
         v.push(if f.secondi < PAZIENZA_PEER {
             passo(InCorso, "Cerco gli altri giocatori del tavolo")
+        } else if f.scartati_orario > 0 {
+            passo(
+                Fallito,
+                "L'orologio di questo dispositivo sembra sbagliato: controlla data e ora, poi premi Riprova",
+            )
         } else {
             passo(
                 Fallito,
@@ -99,7 +106,7 @@ pub fn passi(f: &Fatti) -> Vec<Passo> {
     } else if f.con_turn {
         passo(
             Fallito,
-            "Non riesco a collegarmi: chi ha creato il tavolo tenga l'app aperta in primo piano, poi premi Riprova. Se non basta, provate sulla stessa Wi-Fi o controllate il server TURN",
+            "Non riesco a collegarmi: chi ha creato il tavolo tenga l'app aperta in primo piano, poi premi Riprova. Se non basta, il server TURN potrebbe aver esaurito la quota: provate sulla stessa Wi-Fi",
         )
     } else {
         passo(
@@ -127,6 +134,7 @@ pub fn fatti(ctx: Ctx) -> Option<Fatti> {
         relay_totali: d.relay_totali,
         relay_collegati: d.relay_collegati,
         peer_visti: d.peer_visti,
+        scartati_orario: d.scartati_orario,
         peer_collegati: s.peer_collegati(),
         versione_altrui: s.nodo().versione_altrui(),
         secondi: adesso.saturating_sub(*c.aperta.borrow()) / 1000,
@@ -299,6 +307,11 @@ mod tests {
             !serve_turn(&f),
             "the code may be wrong: TURN would not help"
         );
+        f.scartati_orario = 3;
+        assert!(
+            ultimo(&f).testo.contains("orologio"),
+            "a wrong clock is named"
+        );
     }
 
     #[test]
@@ -313,6 +326,7 @@ mod tests {
         assert!(ultimo(&f).testo.contains("server TURN qui sotto"));
         f.con_turn = true;
         assert!(ultimo(&f).testo.contains("tenga l'app aperta"));
+        assert!(ultimo(&f).testo.contains("esaurito la quota"));
         f.peer_collegati = 1;
         assert_eq!(ultimo(&f).esito, Esito::Fatto);
         assert!(!serve_turn(&f));

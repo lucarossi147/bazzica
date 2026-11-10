@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use bazzica_core::{Azione, Seat};
 use serde::{Deserialize, Serialize};
 
-use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, Voce};
+use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, TipoTimer, Voce};
 
 /// Bumped on any incompatible change to the messages or to the replicated state.
 ///
@@ -13,7 +13,21 @@ use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, Voce};
 /// - 4: [`Sessione`] in `Ciao`, the host's [`Regia`] in `Istantanea`, `Sostituito`.
 /// - 5: `HoReplica` (fixes stale replica flags), `Presenti` (the host's view, for the
 ///   majority rule of elections).
-pub const VERSIONE_PROTOCOLLO: u32 = 5;
+/// - 6: `Ricevuta`, the host's acknowledgement of a request.
+/// - 7: end-of-hand timer (`TipoTimer::FineMano`, `Impostazioni::timer_fine_mano`), seat
+///   replacement (`Voce::Sostituisci`, `Voce::Riprendi`, `Tavolo::sostituiti`).
+/// - 8: room key derived with scrypt (codes of older builds lead to another room).
+/// - 9: the host's running timer in `Voce` ([`TimerInCorso`]).
+pub const VERSIONE_PROTOCOLLO: u32 = 9;
+
+/// The host's turn timer when it sent an entry: followers show the same countdown, with no
+/// clock comparison (their deadline is the receive time plus `resto_ms`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimerInCorso {
+    pub tipo: TipoTimer,
+    pub seat: Option<Seat>,
+    pub resto_ms: u64,
+}
 
 /// One run of the app (a page load) for an identity. When two runs of the same identity are
 /// connected (two tabs, a reload before the old link timed out), the newer one wins: later
@@ -27,7 +41,7 @@ pub struct Sessione {
 }
 
 /// Who hosts: a participant in one of its sessions (another tab of the same id is not host).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Regia {
     pub id: IdGiocatore,
     pub sessione: Sessione,
@@ -37,14 +51,29 @@ pub struct Regia {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "richiesta", rename_all = "snake_case")]
 pub enum Richiesta {
-    Siedi { posto: Seat },
-    Alzati { posto: Seat },
-    Bot { posto: Seat, aggiungi: bool },
+    Siedi {
+        posto: Seat,
+    },
+    Alzati {
+        posto: Seat,
+    },
+    Bot {
+        posto: Seat,
+        aggiungi: bool,
+    },
     Imposta(Impostazioni),
     Avvia,
     Azione(Azione),
     Prosegui,
     Termina,
+    /// A bot takes the seat of a human who has been away for a while.
+    Sostituisci {
+        posto: Seat,
+    },
+    /// Take back one's own seat from the bot that replaced us.
+    Riprendi {
+        posto: Seat,
+    },
 }
 
 /// Cosmetic effects that do not change the game: sent straight to everyone, never logged.
@@ -78,12 +107,20 @@ pub enum Messaggio {
         rid: u64,
         motivo: String,
     },
+    /// Host -> player: the request was handled (applied, or a duplicate of one that was).
+    /// Until this or `Rifiuto` arrives, the player resends it (same `rid`) to whoever hosts.
+    Ricevuta {
+        rid: u64,
+    },
     /// Host -> everyone: entry number `n` of the log and the replica hash after applying it.
     Voce {
         epoca: u64,
         n: u64,
         voce: Voce,
         impronta: String,
+        /// The host's running timer (not part of the replica, so not of its hash).
+        #[serde(default)]
+        timer: Option<TimerInCorso>,
     },
     /// The whole replica, sent to newcomers, to peers that fell behind and on resync.
     Istantanea {

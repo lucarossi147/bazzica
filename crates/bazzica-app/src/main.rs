@@ -9,6 +9,7 @@ mod guida;
 mod home;
 mod partita;
 mod profilo;
+mod riapertura;
 mod stanza;
 
 use std::collections::BTreeSet;
@@ -17,7 +18,7 @@ use std::time::Duration;
 
 use bazzica_core::{Evento, Fase, Seat};
 use bazzica_net::tavolo::FRASI;
-use bazzica_net::{Effimero, IdGiocatore, Richiesta, StatoTavolo, Tavolo, Uscita, Voce};
+use bazzica_net::{Effimero, IdGiocatore, Richiesta, StatoTavolo, Tavolo, TipoTimer, Uscita, Voce};
 use bazzica_rete::matchbox::PeerId;
 use dioxus::prelude::*;
 use serde_json::json;
@@ -70,6 +71,19 @@ pub const SENZA_REGIA: &str =
     "Non riesco a raggiungere la regia: aspetto che si ricolleghi qualcuno";
 
 impl Vista {
+    /// Whether this user may make request `r` (the same rule the host applies).
+    pub fn puo(&self, r: &Richiesta) -> bool {
+        let creatore_presente = self.connessi.contains(self.tavolo.creatore());
+        bazzica_net::tavolo::permesso(
+            &self.tavolo,
+            &self.io,
+            r,
+            creatore_presente,
+            self.host.as_deref(),
+        )
+        .is_ok()
+    }
+
     pub fn nome(&self, id: &str) -> String {
         self.tavolo
             .partecipante(id)
@@ -184,6 +198,9 @@ impl Ctx {
     }
 
     pub fn esci(&self) {
+        if let Some(c) = self.conn.peek().clone() {
+            c.chiudi();
+        }
         let mut conn = self.conn;
         conn.set(None);
         imposta_codice_url("");
@@ -211,16 +228,21 @@ fn tocca_a_me(t: &Tavolo, io: &str) -> bool {
 }
 
 /// Seconds left on my turn, when it is my turn and the play timer is on.
-fn secondi_rimasti(c: &Connessione, ctx: Ctx, adesso: u64) -> Option<u64> {
-    let s = c.sessione.borrow();
-    let n = s.nodo();
-    let t = n.tavolo()?;
-    let durata = u64::from(t.impostazioni.timer_giocata);
-    if durata == 0 || n.in_pausa() || !tocca_a_me(t, &n.io().id) {
-        return None;
-    }
-    let inizio = ctx.turno.peek().1;
-    Some(durata.saturating_sub(adesso.saturating_sub(inizio) / 1000))
+fn secondi_rimasti(c: &Connessione, adesso: u64) -> Option<u64> {
+    let mio = {
+        let s = c.sessione.borrow();
+        let n = s.nodo();
+        !n.in_pausa() && n.tavolo().is_some_and(|t| tocca_a_me(t, &n.io().id))
+    };
+    mio.then(|| secondi_timer(c, adesso))
+        .flatten()
+        .map(|(_, _, secondi)| secondi)
+}
+
+/// The host's running timer as this device sees it: kind, seat, whole seconds left.
+pub fn secondi_timer(c: &Connessione, adesso: u64) -> Option<(TipoTimer, Option<Seat>, u64)> {
+    let (tipo, seat, fino) = c.sessione.borrow().nodo().timer()?;
+    Some((tipo, seat, fino.saturating_sub(adesso).div_ceil(1000)))
 }
 
 /// Engine events this device may see (private ones only for its own seats), as JSON.
@@ -341,12 +363,16 @@ fn App() -> Element {
     use_future(move || async move {
         let mut nascosto_da: Option<u64> = None;
         let mut ultima_riapertura = 0u64;
+        let mut senza_peer = riapertura::SenzaPeer::default();
         let mut connessi = BTreeSet::new();
         let mut ultimo_tic = 0u64;
         loop {
             futures_timer::Delay::new(Duration::from_millis(50)).await;
             let adesso = ora();
-            if adesso / 250 != *ctx.ora.peek() / 250 {
+            // a hidden page keeps driving the node (the host must keep the game going;
+            // browsers throttle this loop to about once a second), but skips UI-only work
+            let nascosto = documento_nascosto();
+            if !nascosto && adesso / 250 != *ctx.ora.peek() / 250 {
                 let mut o = ctx.ora;
                 o.set(adesso);
             }
@@ -359,20 +385,34 @@ fn App() -> Element {
             let Some(c) = ctx.conn.peek().clone() else {
                 continue;
             };
-            // phones suspend pages: rebuild the connection after a nap or when it died
-            if documento_nascosto() {
+            // rebuild the transport when it is unhealthy, not merely because the page hid
+            let dormito_ms = if nascosto {
                 nascosto_da.get_or_insert(adesso);
-                continue;
-            }
-            let dormito = nascosto_da.take().is_some_and(|t| adesso > t + 3000);
-            if (dormito || *c.caduta.borrow()) && adesso > ultima_riapertura + 5000 {
+                None
+            } else {
+                nascosto_da.take().map(|t| adesso - t)
+            };
+            let senza_peer_dal = {
+                let s = c.sessione.borrow();
+                senza_peer.osserva(adesso, s.peer_collegati(), s.nodo().tavolo().is_some())
+            };
+            let fatti = riapertura::FattiRete {
+                adesso,
+                ultima_riapertura,
+                caduta: c.cicli.borrow().caduta(),
+                dormito_ms,
+                senza_peer_dal,
+            };
+            if riapertura::serve_riaprire(&fatti) {
                 ultima_riapertura = adesso;
+                senza_peer.riaperta();
                 c.riapri();
             }
             let uscite = c.aggiorna();
             ctx.gestisci(&c, uscite);
             // last five seconds of my turn: tick
-            if let Some(rimasti) = secondi_rimasti(&c, ctx, adesso)
+            if !nascosto
+                && let Some(rimasti) = secondi_rimasti(&c, adesso)
                 && (1..=5).contains(&rimasti)
                 && rimasti != ultimo_tic
             {

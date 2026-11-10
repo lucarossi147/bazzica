@@ -8,14 +8,24 @@ use std::sync::Arc;
 use bazzica_net::{Destinatario, Effimero, Errore, Messaggio, Nodo, Richiesta, Uscita};
 use matchbox_socket::{MessageLoopFuture, PeerId, PeerState, WebRtcSocket};
 
+use crate::frammenti::{self, Ricompositore};
 use crate::ice::{Diagnosi, DiagnosiCondivisa, Turn, leggi, server_ice};
-use crate::segnalatore::NostrSignallerBuilder;
+use crate::segnalatore::{NostrSignallerBuilder, NotizieCondivise};
+
+/// How long a replaced socket is kept, so its signaller can say goodbye to the room (ms).
+const CONGEDO_MS: u64 = 3_000;
 
 pub struct Sessione {
     socket: WebRtcSocket,
     nodo: Nodo<PeerId>,
     turn: Option<Turn>,
     diagnosi: DiagnosiCondivisa,
+    notizie: NotizieCondivise,
+    /// Replaced sockets saying goodbye, dropped at the given time.
+    congedi: Vec<(WebRtcSocket, u64)>,
+    ricompositore: Ricompositore<PeerId>,
+    /// Id of the last message sent in fragments.
+    id_frammenti: u32,
 }
 
 impl Sessione {
@@ -27,6 +37,7 @@ impl Sessione {
         turn: Option<Turn>,
     ) -> (Sessione, MessageLoopFuture) {
         let diagnosi = segnalatore.diagnosi.clone();
+        let notizie = segnalatore.notizie.clone();
         let (socket, ciclo) = Self::socket(codice, segnalatore, turn.as_ref());
         (
             Sessione {
@@ -34,6 +45,10 @@ impl Sessione {
                 nodo,
                 turn,
                 diagnosi,
+                notizie,
+                congedi: vec![],
+                ricompositore: Ricompositore::default(),
+                id_frammenti: 0,
             },
             ciclo,
         )
@@ -63,9 +78,12 @@ impl Sessione {
         turn: Option<Turn>,
     ) -> MessageLoopFuture {
         self.nodo.scollega_tutti(ora);
+        self.chiudi();
         self.diagnosi = segnalatore.diagnosi.clone();
+        self.notizie = segnalatore.notizie.clone();
         let (socket, ciclo) = Self::socket(codice, segnalatore, turn.as_ref());
-        self.socket = socket;
+        let vecchio = std::mem::replace(&mut self.socket, socket);
+        self.congedi.push((vecchio, ora + CONGEDO_MS));
         self.turn = turn;
         ciclo
     }
@@ -84,6 +102,14 @@ impl Sessione {
             .build()
     }
 
+    /// Asks the signaller to say goodbye to the room and stop (leaving the table). Keep the
+    /// session alive for a few seconds afterwards so the goodbye can go out.
+    pub fn chiudi(&mut self) {
+        if let Ok(mut n) = self.notizie.lock() {
+            n.chiudi = true;
+        }
+    }
+
     pub fn nodo(&self) -> &Nodo<PeerId> {
         &self.nodo
     }
@@ -95,17 +121,28 @@ impl Sessione {
 
     /// Processes the network and the clock; returns what the UI must react to.
     pub fn aggiorna(&mut self, ora: u64) -> Vec<Uscita<PeerId>> {
+        self.congedi.retain(|(_, fino)| ora < *fino);
         if let Ok(cambi) = self.socket.try_update_peers() {
             for (p, stato) in cambi {
-                match stato {
-                    PeerState::Connected => self.nodo.connesso(ora, p),
-                    PeerState::Disconnected => self.nodo.disconnesso(ora, &p),
+                let aperto = stato == PeerState::Connected;
+                // the signaller retries pairs whose link closed
+                if let Ok(mut n) = self.notizie.lock() {
+                    n.collegamenti.push_back((p, aperto));
+                }
+                if aperto {
+                    self.nodo.connesso(ora, p);
+                } else {
+                    self.ricompositore.dimentica(&p);
+                    self.nodo.disconnesso(ora, &p);
                 }
             }
         }
         if let Ok(canale) = self.socket.get_channel_mut(0) {
             for (p, pacchetto) in canale.receive() {
-                match Messaggio::decodifica(&pacchetto) {
+                let Some(intero) = self.ricompositore.ricevi(&p, &pacchetto) else {
+                    continue; // a fragment of a message still arriving
+                };
+                match Messaggio::decodifica(&intero) {
                     Some(m) => self.nodo.ricevi(ora, p, m),
                     None => log::warn!("messaggio non valido da {p}"),
                 }
@@ -132,17 +169,23 @@ impl Sessione {
         for u in self.nodo.uscite() {
             match u {
                 Uscita::Invia { a, msg } => {
-                    let pacchetto: matchbox_socket::Packet = msg.codifica().into();
+                    self.id_frammenti = self.id_frammenti.wrapping_add(1);
+                    let pacchetti: Vec<matchbox_socket::Packet> =
+                        frammenti::spezza(&msg.codifica(), self.id_frammenti)
+                            .into_iter()
+                            .map(Into::into)
+                            .collect();
                     let Ok(canale) = self.socket.get_channel_mut(0) else {
                         continue;
                     };
-                    match a {
-                        Destinatario::Tutti => {
-                            for p in &connessi {
-                                canale.send(pacchetto.clone(), *p);
-                            }
+                    let destinatari = match a {
+                        Destinatario::Tutti => connessi.clone(),
+                        Destinatario::Uno(p) => vec![p],
+                    };
+                    for p in destinatari {
+                        for pacchetto in &pacchetti {
+                            canale.send(pacchetto.clone(), p);
                         }
-                        Destinatario::Uno(p) => canale.send(pacchetto, p),
                     }
                 }
                 altro => resto.push(altro),

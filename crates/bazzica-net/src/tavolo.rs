@@ -60,6 +60,13 @@ pub struct Impostazioni {
     /// How long bots "think" before playing.
     #[serde(default)]
     pub ritmo: Ritmo,
+    /// Seconds the end-of-hand summary waits for the players; 0 waits forever.
+    #[serde(default = "trenta")]
+    pub timer_fine_mano: u32,
+}
+
+fn trenta() -> u32 {
+    30
 }
 
 /// Bot pace: a factor on the node's base bot delay, so everyone can follow the plays.
@@ -108,6 +115,7 @@ impl Default for Impostazioni {
             timer_giocata: 15,
             squadre: NOMI_SQUADRE.map(String::from),
             ritmo: Ritmo::default(),
+            timer_fine_mano: trenta(),
         }
     }
 }
@@ -118,6 +126,7 @@ impl Impostazioni {
         self.nome = taglia(&self.nome, 40, "Tavolo");
         self.timer_scambio = self.timer_scambio.min(MAX_TIMER);
         self.timer_giocata = self.timer_giocata.min(MAX_TIMER);
+        self.timer_fine_mano = self.timer_fine_mano.min(MAX_TIMER);
         for (i, s) in self.squadre.iter_mut().enumerate() {
             *s = taglia(s, 20, NOMI_SQUADRE[i]);
         }
@@ -148,6 +157,8 @@ pub enum StatoTavolo {
 pub enum TipoTimer {
     Scambio,
     Giocata,
+    /// The end-of-hand summary: on expiry everyone counts as having acknowledged.
+    FineMano,
 }
 
 /// One entry of the replicated log. Only the sequencer (host) creates entries; it has already
@@ -187,6 +198,15 @@ pub enum Voce {
     Termina {
         da: IdGiocatore,
     },
+    /// A bot takes the seat of a human who left during the game.
+    Sostituisci {
+        posto: Seat,
+    },
+    /// The human whose seat a bot took is back and plays it again.
+    Riprendi {
+        posto: Seat,
+        id: IdGiocatore,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,6 +235,9 @@ pub struct Tavolo {
     /// Humans who acknowledged the current end-of-hand summary.
     pub ack: BTreeSet<IdGiocatore>,
     pub terminata_da: Option<IdGiocatore>,
+    /// For each seat a bot took over during the game: whose it was.
+    #[serde(default)]
+    pub sostituiti: [Option<IdGiocatore>; 4],
     /// Number of log entries applied so far.
     pub n: u64,
 }
@@ -229,6 +252,7 @@ impl Tavolo {
             partita: None,
             ack: BTreeSet::new(),
             terminata_da: None,
+            sostituiti: Default::default(),
             n: 0,
         }
     }
@@ -302,6 +326,19 @@ impl Tavolo {
         }
     }
 
+    /// Checks a replica received from another peer before adopting it (it must not be able
+    /// to crash this node or its UI later).
+    pub fn valida(&self) -> Result<(), Errore> {
+        if self.partecipanti.is_empty() {
+            return errore("Tavolo senza partecipanti");
+        }
+        match (&self.stato, &self.partita) {
+            (StatoTavolo::InCorso, None) => errore("Partita in corso mancante"),
+            (_, Some(st)) => st.valida().map_err(Errore),
+            _ => Ok(()),
+        }
+    }
+
     /// The table after one log entry, leaving `self` untouched.
     pub fn applicata(&self, voce: &Voce) -> Result<(Tavolo, Vec<Evento>), Errore> {
         let mut copia = self.clone();
@@ -318,17 +355,18 @@ impl Tavolo {
     }
 
     fn applica_interno(&mut self, voce: &Voce) -> Result<Vec<Evento>, Errore> {
+        // actions name seats: the engine indexes by them, so they must exist
+        let azioni: &[Azione] = match voce {
+            Voce::Azione(a) => std::slice::from_ref(a),
+            Voce::Scaduto { azioni, .. } => azioni,
+            _ => &[],
+        };
+        if azioni.iter().any(|a| a.seat().is_some_and(|s| s > 3)) {
+            return errore("Posto inesistente");
+        }
         match voce {
             Voce::Entra(p) => {
-                let p = Partecipante {
-                    id: p.id.clone(),
-                    nome: taglia(&p.nome, MAX_NOME, "Giocatore"),
-                    avatar: if AVATAR.contains(&p.avatar.as_str()) {
-                        p.avatar.clone()
-                    } else {
-                        AVATAR[self.partecipanti.len() % AVATAR.len()].into()
-                    },
-                };
+                let p = normalizza(p, self.partecipante(&p.id), self.partecipanti.len());
                 match self.partecipanti.iter_mut().find(|x| x.id == p.id) {
                     Some(x) => *x = p,
                     None => self.partecipanti.push(p),
@@ -380,6 +418,7 @@ impl Tavolo {
                 self.stato = StatoTavolo::InCorso;
                 self.ack.clear();
                 self.terminata_da = None;
+                self.sostituiti = Default::default();
                 Ok(eventi)
             }
             Voce::Azione(a) => {
@@ -387,6 +426,37 @@ impl Tavolo {
                 let eventi = st.apply(a).map_err(|e| Errore(e.0))?;
                 self.dopo_azione();
                 Ok(eventi)
+            }
+            Voce::Scaduto {
+                timer: TipoTimer::FineMano,
+                ..
+            } => {
+                if self.partita_mut()?.fase != Fase::FineMano {
+                    return errore("Non è la fine di una mano");
+                }
+                self.ack = self.umani();
+                Ok(vec![])
+            }
+            Voce::Sostituisci { posto } => {
+                self.partita_mut()?;
+                let p = self.posto_mut(*posto)?;
+                let Some(Posto::Umano { id }) = p.take() else {
+                    return errore("Nessun giocatore da sostituire");
+                };
+                *p = Some(Posto::Bot);
+                self.sostituiti[usize::from(*posto)] = Some(id);
+                Ok(vec![])
+            }
+            Voce::Riprendi { posto, id } => {
+                self.partita_mut()?;
+                let i = usize::from(*posto);
+                let bot = matches!(self.posti.get(i), Some(Some(Posto::Bot)));
+                if self.sostituiti.get(i) != Some(&Some(id.clone())) || !bot {
+                    return errore("Questo posto non era tuo");
+                }
+                self.posti[i] = Some(Posto::Umano { id: id.clone() });
+                self.sostituiti[i] = None;
+                Ok(vec![])
             }
             Voce::Scaduto { azioni, .. } => {
                 let st = self.partita_mut()?;
@@ -431,9 +501,169 @@ impl Tavolo {
     }
 }
 
+/// How a participant is stored: name trimmed and bounded; an unknown avatar keeps the current
+/// one (`attuale`), or gets one by join order (`n` participants so far). The host compares
+/// this with what it holds, so an unchanged reconnection appends no entry.
+pub fn normalizza(p: &Partecipante, attuale: Option<&Partecipante>, n: usize) -> Partecipante {
+    let avatar = if AVATAR.contains(&p.avatar.as_str()) {
+        p.avatar.clone()
+    } else {
+        attuale.map_or_else(|| AVATAR[n % AVATAR.len()].into(), |a| a.avatar.clone())
+    };
+    Partecipante {
+        id: p.id.clone(),
+        nome: taglia(&p.nome, MAX_NOME, "Giocatore"),
+        avatar,
+    }
+}
+
+/// Who may ask for what: the one place where the table's permissions live (the host checks it
+/// before sequencing, the UI to hide what one cannot do). `creatore_presente`: whether the
+/// creator is connected; `host`: who hosts now.
+///
+/// | Request                      | Allowed for                                              |
+/// |------------------------------|----------------------------------------------------------|
+/// | `Imposta`                    | the creator; the host while the creator is away          |
+/// | `Avvia`                      | the creator or a seated human                            |
+/// | `Bot` (add) / `Siedi`        | anyone                                                   |
+/// | `Bot` (remove), `Sostituisci`, `Termina` | the creator or a seated human                |
+/// | `Alzati`                     | the seat's owner, anyone for a bot, the creator          |
+/// | `Prosegui`                   | a seated human                                           |
+/// | `Azione`                     | the human in that seat                                   |
+pub fn permesso(
+    t: &Tavolo,
+    chi: &str,
+    r: &crate::protocollo::Richiesta,
+    creatore_presente: bool,
+    host: Option<&str>,
+) -> Result<(), Errore> {
+    use crate::protocollo::Richiesta as R;
+    let creatore = t.creatore() == chi;
+    let seduto = t.umani().contains(chi);
+    let consentito = |ok: bool, motivo: &str| if ok { Ok(()) } else { errore(motivo) };
+    match r {
+        R::Imposta(_) => consentito(
+            creatore || (!creatore_presente && host == Some(chi)),
+            "Solo chi ha creato il tavolo può cambiare le regole",
+        ),
+        R::Avvia => consentito(
+            creatore || seduto,
+            "Solo chi è seduto al tavolo può avviare la partita",
+        ),
+        R::Bot { aggiungi: true, .. } | R::Siedi { .. } | R::Riprendi { .. } => Ok(()),
+        R::Bot {
+            aggiungi: false, ..
+        } => consentito(
+            creatore || seduto,
+            "Solo chi è seduto al tavolo può togliere un bot",
+        ),
+        R::Sostituisci { .. } => consentito(
+            creatore || seduto,
+            "Solo chi è seduto al tavolo può sostituire un giocatore",
+        ),
+        R::Termina => consentito(
+            creatore || seduto,
+            "Solo chi è seduto al tavolo può terminare la partita",
+        ),
+        R::Alzati { posto } => {
+            let bot = matches!(t.posti.get(usize::from(*posto)), Some(Some(Posto::Bot)));
+            consentito(
+                creatore || bot || t.posti_di(chi).contains(posto),
+                "Non puoi liberare questo posto",
+            )
+        }
+        R::Prosegui => consentito(seduto, "Non sei seduto al tavolo"),
+        R::Azione(a) => match a.seat() {
+            None => errore("Azione riservata al sistema"),
+            Some(s) => consentito(t.posti_di(chi).contains(&s), "Non controlli questo posto"),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocollo::Richiesta as R;
+
+    #[test]
+    fn chi_puo_chiedere_cosa() {
+        let p = |id: &str| Partecipante {
+            id: id.into(),
+            nome: id.into(),
+            avatar: AVATAR[0].into(),
+        };
+        let mut t = Tavolo::nuovo(p("crea"), Impostazioni::default());
+        for id in ["seduto", "spett"] {
+            t.partecipanti.push(p(id));
+        }
+        t.posti = [
+            Some(Posto::Umano {
+                id: "seduto".into(),
+            }),
+            Some(Posto::Bot),
+            None,
+            None,
+        ];
+        let ok = |chi: &str, r: R, presente: bool, host: Option<&str>| {
+            permesso(&t, chi, &r, presente, host).is_ok()
+        };
+        let imp = || R::Imposta(Impostazioni::default());
+        // (request, creator, seated, spectator) with the creator present
+        let tabella = [
+            (imp(), true, false, false),
+            (R::Avvia, true, true, false),
+            (
+                R::Bot {
+                    posto: 2,
+                    aggiungi: true,
+                },
+                true,
+                true,
+                true,
+            ),
+            (
+                R::Bot {
+                    posto: 1,
+                    aggiungi: false,
+                },
+                true,
+                true,
+                false,
+            ),
+            (R::Siedi { posto: 2 }, true, true, true),
+            (R::Alzati { posto: 0 }, true, true, false),
+            (R::Alzati { posto: 1 }, true, true, true),
+            (R::Termina, true, true, false),
+            (R::Sostituisci { posto: 0 }, true, true, false),
+            (R::Prosegui, false, true, false),
+        ];
+        for (r, crea, seduto, spett) in tabella {
+            let visto = [
+                ok("crea", r.clone(), true, None),
+                ok("seduto", r.clone(), true, None),
+                ok("spett", r.clone(), true, None),
+            ];
+            assert_eq!(visto, [crea, seduto, spett], "{r:?}");
+        }
+        // settings: the host while the creator is away
+        assert!(ok("spett", imp(), false, Some("spett")));
+        assert!(!ok("spett", imp(), true, Some("spett")));
+        assert!(!ok("seduto", imp(), false, Some("spett")));
+        // moves: only the seat's human; system actions never
+        let gioca = |seat| R::Azione(bazzica_core::Azione::ChePalo { seat });
+        assert!(ok("seduto", gioca(0), true, None));
+        assert!(!ok("crea", gioca(0), true, None));
+        assert!(!ok(
+            "seduto",
+            R::Azione(bazzica_core::Azione::NuovaMano),
+            true,
+            None
+        ));
+        assert!(
+            !ok("seduto", R::Alzati { posto: 9 }, true, None),
+            "no such seat"
+        );
+    }
 
     #[test]
     fn il_ritmo_scala_il_ritardo() {
@@ -471,6 +701,19 @@ mod tests {
         });
         assert_eq!(errore, Err(Errore("Giocatore sconosciuto".into())));
         assert_eq!(t, Tavolo::nuovo(io("a"), Impostazioni::default()));
+    }
+
+    #[test]
+    fn impostazioni_senza_timer_fine_mano_aspettano_trenta_secondi() {
+        let mut v = serde_json::to_value(Impostazioni::default()).unwrap();
+        v.as_object_mut().unwrap().remove("timer_fine_mano");
+        let imp: Impostazioni = serde_json::from_value(v).unwrap();
+        assert_eq!(imp.timer_fine_mano, 30);
+        let lungo = Impostazioni {
+            timer_fine_mano: 10_000,
+            ..Impostazioni::default()
+        };
+        assert_eq!(lungo.normalizzate().timer_fine_mano, MAX_TIMER);
     }
 
     #[test]
