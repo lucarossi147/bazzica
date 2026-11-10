@@ -17,6 +17,7 @@ pub fn Home() -> Element {
 
     let nome_ok = !profilo.read().nome.trim().is_empty();
     let mut guida = use_signal(|| false);
+    let mazzo = (ctx.mazzo)();
 
     let entra = move |codice_tavolo: String, crea: bool| {
         let p = profilo.read().clone();
@@ -47,6 +48,11 @@ pub fn Home() -> Element {
 
     rsx! {
         div { class: "schermo centrato",
+            div { class: "ventaglio", "aria-hidden": "true",
+                for codice in ["coppe_01", "denari_07", "denari_10"] {
+                    img { src: mazzo.src(codice), alt: "", draggable: "false" }
+                }
+            }
             h1 { class: "logo", "Bazzica" }
             p { class: "sottotitolo", "Il gioco di carte, tra amici, senza server." }
             button { class: "guida-link", onclick: move |_| guida.set(true), "Come si gioca" }

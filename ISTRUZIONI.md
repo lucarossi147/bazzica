@@ -22,7 +22,14 @@ Su iPhone: Condividi → *Aggiungi alla schermata Home* per averla come app a tu
 I suoni partono dopo il primo tocco sulla pagina.
 
 ## Durante la partita
-- Tocca una carta: compaiono le prese possibili; tocca l'opzione per giocare.
+- Tocca una carta: compaiono le prese possibili, disegnate con le carte. Se la carta può
+  prendere combinazioni diverse scegli tu quale: tocca l'opzione, oppure tocca le carte in
+  tavola (quelle che si possono prendere brillano) e poi di nuovo la carta per confermare.
+- **Prenotare la giocata**: anche quando non tocca a te puoi scegliere carta e presa; la
+  giocata parte da sola appena arriva il tuo turno. Se nel frattempo la tavola è cambiata e la
+  giocata non sarebbe più quella che avevi scelto, non parte e ti viene chiesto di scegliere
+  di nuovo. Tocca la carta prenotata (o *Annulla*) per ripensarci. Si può prenotare anche la
+  **Bazzica**: viene chiamata prima della carta.
 - **Bazzica!** e **Che palo!** compaiono quando sono possibili.
 - 💬 apre le frasi veloci (una ogni 3 secondi al massimo).
 - **Striscia**: trascina una carta per mettere fretta al giocatore prima di te.
