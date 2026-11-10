@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use bazzica_core::{Azione, Seat};
 use serde::{Deserialize, Serialize};
 
-use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, Voce};
+use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, TipoTimer, Voce};
 
 /// Bumped on any incompatible change to the messages or to the replicated state.
 ///
@@ -16,7 +16,18 @@ use crate::tavolo::{IdGiocatore, Impostazioni, Partecipante, Tavolo, Voce};
 /// - 6: `Ricevuta`, the host's acknowledgement of a request.
 /// - 7: end-of-hand timer (`TipoTimer::FineMano`, `Impostazioni::timer_fine_mano`), seat
 ///   replacement (`Voce::Sostituisci`, `Voce::Riprendi`, `Tavolo::sostituiti`).
-pub const VERSIONE_PROTOCOLLO: u32 = 7;
+/// - 8: room key derived with scrypt (codes of older builds lead to another room).
+/// - 9: the host's running timer in `Voce` ([`TimerInCorso`]).
+pub const VERSIONE_PROTOCOLLO: u32 = 9;
+
+/// The host's turn timer when it sent an entry: followers show the same countdown, with no
+/// clock comparison (their deadline is the receive time plus `resto_ms`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimerInCorso {
+    pub tipo: TipoTimer,
+    pub seat: Option<Seat>,
+    pub resto_ms: u64,
+}
 
 /// One run of the app (a page load) for an identity. When two runs of the same identity are
 /// connected (two tabs, a reload before the old link timed out), the newer one wins: later
@@ -107,6 +118,9 @@ pub enum Messaggio {
         n: u64,
         voce: Voce,
         impronta: String,
+        /// The host's running timer (not part of the replica, so not of its hash).
+        #[serde(default)]
+        timer: Option<TimerInCorso>,
     },
     /// The whole replica, sent to newcomers, to peers that fell behind and on resync.
     Istantanea {

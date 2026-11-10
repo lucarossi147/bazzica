@@ -61,6 +61,9 @@ pub struct NostrSignallerBuilder {
     /// Progress of the signaling, for the UI.
     pub diagnosi: DiagnosiCondivisa,
     pub notizie: NotizieCondivise,
+    /// The room derived from the code, kept: deriving it is deliberately slow, and matchbox
+    /// makes a new signaller on every reconnection attempt.
+    pub stanza: Arc<Mutex<Option<(String, Stanza)>>>,
 }
 
 impl Default for NostrSignallerBuilder {
@@ -69,6 +72,7 @@ impl Default for NostrSignallerBuilder {
             relays: RELAY_PREDEFINITI.map(String::from).to_vec(),
             diagnosi: DiagnosiCondivisa::default(),
             notizie: NotizieCondivise::default(),
+            stanza: Arc::default(),
         }
     }
 }
@@ -132,20 +136,70 @@ fn eta_plausibile(creato: u64, adesso: u64) -> bool {
     creato.abs_diff(adesso) <= ETA_MASSIMA
 }
 
+/// Seconds between attempts to reconnect a relay that closed or never answered.
+const RIPROVA_RELAY: u64 = 30;
+
+/// One relay: its connection while open, and when to try again otherwise.
+struct Relay {
+    url: String,
+    uscita: Option<ws::Uscita>,
+    /// Its stored events are over: what it sends now is live.
+    dal_vivo: bool,
+    prossimo_tentativo: u64,
+}
+
+/// Frames of every relay, tagged with the relay's index; `None` once that relay closed.
+type Entrate = SelectAll<futures::stream::BoxStream<'static, (usize, Option<String>)>>;
+
+/// Connects to a relay and subscribes to the room: the sender and the tagged frames.
+async fn apri_relay(
+    url: &str,
+    i: usize,
+    stanza: &Stanza,
+) -> Result<
+    (
+        ws::Uscita,
+        futures::stream::BoxStream<'static, (usize, Option<String>)>,
+    ),
+    String,
+> {
+    let (mut tx, rx) = connetti_entro(url, ATTESA_RELAY).await?;
+    // stored events are ignored anyway: `since` only bounds what relays replay
+    let filtro = json!({"kinds": [KIND_SEGNALE], "#t": [stanza.etichetta], "since": adesso().saturating_sub(ETA_MASSIMA)});
+    let req = json!(["REQ", "bazzica", filtro]).to_string();
+    if !invia_entro(&mut tx, req, ATTESA_RELAY).await {
+        return Err("subscription refused".into());
+    }
+    let fine = futures::stream::once(async move { (i, None) });
+    Ok((tx, rx.map(move |f| (i, Some(f))).chain(fine).boxed()))
+}
+
 pub struct NostrSignaller {
     stanza: Stanza,
     chiavi: Chiavi,
     io: PeerId,
-    uscite: SyncWrapper<Vec<ws::Uscita>>,
-    /// Frames of every relay, tagged with the relay's index.
-    entrate: SyncWrapper<SelectAll<futures::stream::BoxStream<'static, (usize, String)>>>,
-    /// Relays whose stored events are over (what they send now is live).
-    dal_vivo: Vec<bool>,
+    relay: SyncWrapper<Vec<Relay>>,
+    entrate: SyncWrapper<Entrate>,
     pendenti: VecDeque<PeerEvent>,
     incontri: Incontri,
     visti: HashSet<String>,
     diagnosi: DiagnosiCondivisa,
     notizie: NotizieCondivise,
+}
+
+impl NostrSignallerBuilder {
+    fn stanza(&self, codice: &str) -> Stanza {
+        let codice = &crate::nostr::normalizza_codice(codice);
+        let mut cache = self.stanza.lock().unwrap_or_else(|e| e.into_inner());
+        match &*cache {
+            Some((c, s)) if c == codice => s.clone(),
+            _ => {
+                let s = Stanza::new(codice);
+                *cache = Some((codice.to_owned(), s.clone()));
+                s
+            }
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -156,33 +210,40 @@ impl SignallerBuilder for NostrSignallerBuilder {
         _attempts: Option<u16>,
         codice: String,
     ) -> Result<Box<dyn Signaller>, SignalingError> {
-        let stanza = Stanza::new(&codice);
+        let stanza = self.stanza(&codice);
         let totali = self.relays.len();
         // matchbox retries with a new signaller: keep the last outcome visible meanwhile
         aggiorna(&self.diagnosi, |d| d.relay_totali = totali);
-        let connessioni =
-            futures::future::join_all(self.relays.iter().map(|r| connetti_entro(r, ATTESA_RELAY)))
-                .await;
-        let mut uscite = vec![];
+        let aperti = futures::future::join_all(
+            self.relays
+                .iter()
+                .enumerate()
+                .map(|(i, url)| apri_relay(url, i, &stanza)),
+        )
+        .await;
+        let mut relay = vec![];
         let mut entrate = SelectAll::new();
-        // stored events are ignored anyway: `since` only bounds what relays replay
-        let filtro = json!({"kinds": [KIND_SEGNALE], "#t": [stanza.etichetta], "since": adesso().saturating_sub(ETA_MASSIMA)});
-        let req = json!(["REQ", "bazzica", filtro]).to_string();
-        for (relay, c) in self.relays.iter().zip(connessioni) {
-            match c {
-                Ok((mut tx, rx)) => {
-                    if tx.send(req.clone()).await.is_ok() {
-                        let i = uscite.len();
-                        uscite.push(tx);
-                        entrate.push(rx.map(move |f| (i, f)).boxed());
-                    }
+        for (url, aperto) in self.relays.iter().zip(aperti) {
+            let uscita = match aperto {
+                Ok((tx, rx)) => {
+                    entrate.push(rx);
+                    Some(tx)
                 }
-                Err(e) => log::warn!("relay {relay}: {e}"),
-            }
+                Err(e) => {
+                    log::warn!("relay {url}: {e}");
+                    None
+                }
+            };
+            relay.push(Relay {
+                url: url.clone(),
+                uscita,
+                dal_vivo: false,
+                prossimo_tentativo: adesso() + RIPROVA_RELAY,
+            });
         }
-        let collegati = uscite.len();
+        let collegati = relay.iter().filter(|r| r.uscita.is_some()).count();
         aggiorna(&self.diagnosi, |d| d.relay_collegati = Some(collegati));
-        if uscite.is_empty() {
+        if collegati == 0 {
             return Err(errore("nessun relay Nostr raggiungibile"));
         }
         let io = PeerId(uuid::Uuid::from_bytes(casuale::<16>()));
@@ -190,8 +251,7 @@ impl SignallerBuilder for NostrSignallerBuilder {
             stanza,
             chiavi: Chiavi::nuove(),
             io,
-            dal_vivo: vec![false; collegati],
-            uscite: SyncWrapper::new(uscite),
+            relay: SyncWrapper::new(relay),
             entrate: SyncWrapper::new(entrate),
             pendenti: VecDeque::from([PeerEvent::IdAssigned(io)]),
             incontri: Incontri::new(io),
@@ -214,20 +274,64 @@ impl NostrSignaller {
             .evento(KIND_SEGNALE, tags, &self.stanza.cifra(&testo), adesso());
         let frame = json!(["EVENT", ev]).to_string();
         // Cancel-safe: matchbox drops `next_message` (which publishes too) whenever a request
-        // comes in, so the senders must never leave `uscite` while we await.
-        let uscite = self.uscite.get_mut();
-        let mut i = 0;
-        while i < uscite.len() {
-            if invia_entro(&mut uscite[i], frame.clone(), ATTESA_RELAY).await {
-                i += 1;
-            } else {
-                drop(uscite.remove(i));
+        // comes in, so the senders stay in their slots while we await.
+        let ora = adesso();
+        for r in self.relay.get_mut().iter_mut() {
+            if let Some(tx) = &mut r.uscita
+                && !invia_entro(tx, frame.clone(), ATTESA_RELAY).await
+            {
+                log::warn!("relay {}: invio fallito", r.url);
+                chiudi_relay(r, ora);
             }
         }
-        if uscite.is_empty() {
-            return Err(errore("tutti i relay Nostr sono caduti"));
-        }
+        // with no relay left the envelope is lost: the pairing retries, and relays reconnect
+        self.conta_relay();
         Ok(())
+    }
+
+    fn conta_relay(&mut self) {
+        let collegati = self
+            .relay
+            .get_mut()
+            .iter()
+            .filter(|r| r.uscita.is_some())
+            .count();
+        aggiorna(&self.diagnosi, |d| d.relay_collegati = Some(collegati));
+    }
+
+    /// Relays that closed or never answered get a new connection, every [`RIPROVA_RELAY`] s.
+    async fn riconnetti(&mut self) {
+        let ora = adesso();
+        let da_aprire: Vec<(usize, String)> = self
+            .relay
+            .get_mut()
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.uscita.is_none() && ora >= r.prossimo_tentativo)
+            .map(|(i, r)| (i, r.url.clone()))
+            .collect();
+        if da_aprire.is_empty() {
+            return;
+        }
+        let aperti = futures::future::join_all(
+            da_aprire
+                .iter()
+                .map(|(i, url)| apri_relay(url, *i, &self.stanza)),
+        )
+        .await;
+        for ((i, url), aperto) in da_aprire.into_iter().zip(aperti) {
+            let r = &mut self.relay.get_mut()[i];
+            match aperto {
+                Ok((tx, rx)) => {
+                    log::info!("relay {url}: ricollegato");
+                    r.uscita = Some(tx);
+                    r.dal_vivo = false;
+                    self.entrate.get_mut().push(rx);
+                }
+                Err(_) => r.prossimo_tentativo = ora + RIPROVA_RELAY,
+            }
+        }
+        self.conta_relay();
     }
 
     /// Decodes a frame of relay `relay` into a live envelope addressed to us (or to everyone).
@@ -239,8 +343,8 @@ impl NostrSignaller {
                 contenuto,
             } => (id, creato, contenuto),
             Frame::FineStorico => {
-                if let Some(v) = self.dal_vivo.get_mut(relay) {
-                    *v = true;
+                if let Some(r) = self.relay.get_mut().get_mut(relay) {
+                    r.dal_vivo = true;
                 }
                 return None;
             }
@@ -250,7 +354,7 @@ impl NostrSignaller {
             }
             Frame::Altro => return None,
         };
-        if !self.dal_vivo.get(relay).copied().unwrap_or(false) {
+        if !self.relay.get_mut().get(relay).is_some_and(|r| r.dal_vivo) {
             return None; // replayed from storage: possibly from a peer long gone
         }
         if !self.visti.insert(id) {
@@ -306,7 +410,9 @@ impl NostrSignaller {
             }
         }
         azioni.extend(self.incontri.scadenze(ora));
-        self.esegui(azioni).await
+        self.esegui(azioni).await?;
+        self.riconnetti().await;
+        Ok(())
     }
 }
 
@@ -325,12 +431,27 @@ impl Signaller for NostrSignaller {
             if let Some(e) = self.pendenti.pop_front() {
                 return Ok(e);
             }
-            let prossimo = futures::select! {
-                f = self.entrate.get_mut().next().fuse() => Some(f.ok_or(SignalingError::StreamExhausted)?),
-                _ = futures_timer::Delay::new(std::time::Duration::from_secs(1)).fuse() => None,
+            let mut un_secondo =
+                futures_timer::Delay::new(std::time::Duration::from_secs(1)).fuse();
+            // with every relay closed there is nothing to read: only the housekeeping, which
+            // reconnects them (an empty `SelectAll` would end at once and spin)
+            let prossimo = if self.entrate.get_mut().is_empty() {
+                un_secondo.await;
+                None
+            } else {
+                futures::select! {
+                    f = self.entrate.get_mut().next().fuse() => f,
+                    _ = un_secondo => None,
+                }
             };
             match prossimo {
-                Some((relay, frame)) => {
+                Some((relay, None)) => {
+                    let r = &mut self.relay.get_mut()[relay];
+                    log::warn!("relay {}: connessione chiusa", r.url);
+                    chiudi_relay(r, adesso());
+                    self.conta_relay();
+                }
+                Some((relay, Some(frame))) => {
                     if let Some(b) = self.decodifica(relay, &frame) {
                         let azioni = self.incontri.busta(b, adesso());
                         self.esegui(azioni).await?;
@@ -340,6 +461,13 @@ impl Signaller for NostrSignaller {
             }
         }
     }
+}
+
+/// Marks a relay closed; it is tried again after [`RIPROVA_RELAY`] seconds.
+fn chiudi_relay(r: &mut Relay, ora: u64) {
+    r.uscita = None;
+    r.dal_vivo = false;
+    r.prossimo_tentativo = ora + RIPROVA_RELAY;
 }
 
 /// How long to wait for each relay before giving up on it.
@@ -366,6 +494,23 @@ async fn connetti_entro(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn la_stanza_si_deriva_una_volta() {
+        let b = NostrSignallerBuilder::default();
+        let prima = b.stanza("ABCD234567");
+        let t = std::time::Instant::now();
+        assert_eq!(b.stanza("abcd-2345 67").etichetta, prima.etichetta);
+        assert!(t.elapsed() < std::time::Duration::from_millis(5), "cached");
+        assert_eq!(
+            NostrSignallerBuilder::default()
+                .stanza("ABCD234567")
+                .etichetta,
+            prima.etichetta,
+            "two builders, same room"
+        );
+        assert_ne!(b.stanza("ZZZZ234567").etichetta, prima.etichetta);
+    }
 
     #[test]
     fn frame_dei_relay() {

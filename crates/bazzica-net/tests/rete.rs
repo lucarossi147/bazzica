@@ -453,11 +453,19 @@ fn lobby_replicata() {
         "Non puoi liberare questo posto"
     );
     r.richiedi(a, Richiesta::Alzati { posto: 1 }); // the creator can
+    // a spectator cannot start the game (P14); a seated player can, with four seats taken
     r.richiedi(c, Richiesta::Avvia);
     assert_eq!(
         r.rifiuti[&c].last().unwrap(),
+        "Solo chi è seduto al tavolo può avviare la partita"
+    );
+    r.richiedi(b, Richiesta::Siedi { posto: 1 });
+    r.richiedi(b, Richiesta::Avvia);
+    assert_eq!(
+        r.rifiuti[&b].last().unwrap(),
         "Servono 4 giocatori (umani o bot)"
     );
+    r.richiedi(b, Richiesta::Alzati { posto: 1 });
     let t = r.tavolo(b);
     assert_eq!(
         t.partecipanti
@@ -692,6 +700,7 @@ fn impronta_diversa_forza_istantanea() {
         n: t.n + 1,
         voce,
         impronta: "deadbeefdeadbeef".into(),
+        timer: None,
     };
     r.coda.push_back((a, c, msg.codifica()));
     // the mismatching entry is never committed: c stays where it was until the snapshot
@@ -1087,6 +1096,7 @@ fn voce_duplicata_diversa_forza_resync() {
         n: t.n,
         voce: r.voci.last().unwrap().clone(),
         impronta: t.impronta(),
+        timer: None,
     };
     r.coda.push_back((a, c, msg.codifica()));
     r.pompa();
@@ -1668,4 +1678,69 @@ fn messaggi_mutati_non_fanno_danni() {
         .map(|h| (r.tavolo(*h).n, r.tavolo(*h).impronta()))
         .collect();
     assert_eq!(onesti.len(), 1, "honest peers diverged");
+}
+
+#[test]
+fn lo_spettatore_non_cambia_le_regole() {
+    let (mut r, a, _, c) = tavolo_tipico(Variante::Vanilla);
+    r.richiedi(a, Richiesta::Termina);
+    r.richiedi(c, Richiesta::Imposta(imp(Variante::Heisenberg)));
+    assert_eq!(
+        r.rifiuti[&c].last().unwrap(),
+        "Solo chi ha creato il tavolo può cambiare le regole"
+    );
+    assert_eq!(r.tavolo(a).impostazioni.variante, Variante::Vanilla);
+    // with the creator gone, the host may
+    r.esci(a);
+    let b = r.host_h();
+    r.richiedi(b, Richiesta::Imposta(imp(Variante::Heisenberg)));
+    assert_eq!(r.tavolo(b).impostazioni.variante, Variante::Heisenberg);
+}
+
+#[test]
+fn riconnettersi_non_ripete_entra() {
+    let mut r = Rete::new();
+    let a = r.crea("a", imp(Variante::Vanilla));
+    let lungo = Partecipante {
+        id: "b".into(),
+        nome: "  Un nome davvero troppo lungo per il tavolo  ".into(),
+        avatar: "non un avatar".into(),
+    };
+    let b = r.entra(Nodo::unisciti(lungo, 2, config()));
+    let entra = |r: &Rete| {
+        r.voci
+            .iter()
+            .filter(|v| matches!(v, Voce::Entra(p) if p.id == "b"))
+            .count()
+    };
+    assert_eq!(entra(&r), 1);
+    let avatar = r.tavolo(a).partecipante("b").unwrap().avatar.clone();
+    let mut b = b;
+    for _ in 0..3 {
+        let n = r.isola(b);
+        b = r.entra(n);
+    }
+    assert_eq!(entra(&r), 1, "a reconnection is not a new entry");
+    assert_eq!(r.tavolo(a).partecipante("b").unwrap().avatar, avatar);
+}
+
+#[test]
+fn il_conto_alla_rovescia_segue_quello_della_regia() {
+    // the host only watches, so its leaving does not pause the game
+    let (mut r, a, b, _) = tavolo_host_spettatore();
+    fino_al_turno_di(&mut r, 0);
+    let host = r.nodo(a).timer().expect("b's play timer runs on the host");
+    assert_eq!(
+        r.nodo(b).timer(),
+        Some(host),
+        "the follower knows the host's deadline"
+    );
+    // after a takeover the new host's timer reaches the others with its next entry
+    r.esci(a);
+    let nuovo = r.host_h();
+    r.gioca_fino(r.tavolo(nuovo).n + 3);
+    let atteso = r.nodo(nuovo).timer();
+    for h in r.nodi.keys() {
+        assert_eq!(r.nodo(*h).timer(), atteso);
+    }
 }

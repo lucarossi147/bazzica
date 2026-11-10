@@ -35,8 +35,9 @@ pub fn Home() -> Element {
         conn.set(Some(c));
     };
 
-    // opened from an invitation link with a known name: join straight away
-    use_hook(move || {
+    // opened from an invitation link with a known name: join straight away, after the first
+    // render (joining sets the connection signal, which must not change during a render)
+    use_effect(move || {
         if let Some(c) = codice_da_url()
             && !profilo.peek().nome.trim().is_empty()
         {

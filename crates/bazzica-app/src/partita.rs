@@ -322,32 +322,22 @@ fn Giocate(vista: Vista, obs: Osservazione, chiudi: EventHandler<()>) -> Element
 #[component]
 fn Turno(vista: Vista, st: GameState, obs: Osservazione, seat: Seat) -> Element {
     let ctx = use_context::<Ctx>();
-    let imp = &vista.tavolo.impostazioni;
     let miei = vista.tavolo.posti_di(&vista.io);
     let mio = st.fase == Fase::Gioco && miei.contains(&st.corrente);
-    let (testo, durata) = match st.fase {
+    let testo = match st.fase {
         Fase::Scambio => {
-            let passata = st.scambio_passata[usize::from(seat)].is_some();
-            (
-                if passata {
-                    "Scambio: aspettiamo gli altri".to_string()
-                } else {
-                    format!(
-                        "Scambio: scegli la carta per {}",
-                        vista.tavolo.nome_posto((seat + 2) % 4)
-                    )
-                },
-                imp.timer_scambio,
-            )
+            if st.scambio_passata[usize::from(seat)].is_some() {
+                "Scambio: aspettiamo gli altri".to_string()
+            } else {
+                format!(
+                    "Scambio: scegli la carta per {}",
+                    vista.tavolo.nome_posto((seat + 2) % 4)
+                )
+            }
         }
         Fase::Gioco => {
-            let durata = if vista.tavolo.e_bot(st.corrente) {
-                0
-            } else {
-                imp.timer_giocata
-            };
             if mio {
-                ("Tocca a te".to_string(), durata)
+                "Tocca a te".to_string()
             } else {
                 let chi = st.corrente;
                 let verbo = if vista.tavolo.e_bot(chi) {
@@ -355,26 +345,25 @@ fn Turno(vista: Vista, st: GameState, obs: Osservazione, seat: Seat) -> Element 
                 } else {
                     "sta giocando"
                 };
-                (
-                    format!(
-                        "{} {} {verbo}",
-                        avatar_posto(&vista, usize::from(chi)),
-                        vista.tavolo.nome_posto(chi)
-                    ),
-                    durata,
+                format!(
+                    "{} {} {verbo}",
+                    avatar_posto(&vista, usize::from(chi)),
+                    vista.tavolo.nome_posto(chi)
                 )
             }
         }
-        Fase::FineMano => ("Fine della mano".to_string(), 0),
-        Fase::FinePartita => ("Partita finita".to_string(), 0),
+        Fase::FineMano => "Fine della mano".to_string(),
+        Fase::FinePartita => "Partita finita".to_string(),
     };
-    let restanti = if durata > 0 && vista.disconnessi.is_empty() {
-        let (_, inizio) = ctx.turno.read().clone();
-        let passati = ctx.ora.read().saturating_sub(inizio) / 1000;
-        Some(u64::from(durata).saturating_sub(passati))
-    } else {
-        None
-    };
+    // the host's own deadline (also after a takeover), not when this device saw the turn change
+    let adesso = *ctx.ora.read();
+    let restanti = ctx
+        .conn
+        .peek()
+        .as_ref()
+        .and_then(|c| crate::secondi_timer(c, adesso))
+        .filter(|_| vista.disconnessi.is_empty())
+        .map(|(_, _, secondi)| secondi);
     let altro = st.fase == Fase::Gioco && !mio;
     let classe = format!(
         "turno{}{}",
@@ -417,11 +406,7 @@ fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
             .collect()
     };
     // Bazzica calls and "che palo": buttons above the hand
-    let altre: Vec<Azione> = legali
-        .iter()
-        .filter(|a| matches!(a, Azione::Bazzica { .. } | Azione::ChePalo { .. }))
-        .cloned()
-        .collect();
+    let altre = azioni_extra(&legali, st.fase);
     // a card chosen ahead of time stays chosen until it leaves the hand
     if scelta().is_some_and(|c| !mano.contains(&c)) {
         scelta.set(None);
@@ -698,11 +683,15 @@ fn Fine(vista: Vista) -> Element {
                     }
                 }
                 div { class: "riga",
-                    button { class: "primario", onclick: move |_| ctx.richiedi(Richiesta::Avvia), "Rivincita" }
-                    button {
-                        class: "secondario",
-                        onclick: move |_| ctx.richiedi(Richiesta::Imposta(imp.clone())),
-                        "Torna ai posti"
+                    if vista.puo(&Richiesta::Avvia) {
+                        button { class: "primario", onclick: move |_| ctx.richiedi(Richiesta::Avvia), "Rivincita" }
+                    }
+                    if vista.puo(&Richiesta::Imposta(imp.clone())) {
+                        button {
+                            class: "secondario",
+                            onclick: move |_| ctx.richiedi(Richiesta::Imposta(imp.clone())),
+                            "Torna ai posti"
+                        }
                     }
                 }
             }
@@ -806,5 +795,44 @@ mod tests_sostituzione {
         t.sostituiti = [None, Some("b".into()), None, Some("b".into())];
         assert_eq!(seggi_da_riprendere(&t, "b"), [1, 3]);
         assert!(seggi_da_riprendere(&t, "a").is_empty());
+    }
+}
+
+/// The actions shown as buttons above the hand: Bazzica calls and "che palo". The engine lists
+/// "che palo" as legal during the exchange too, but the host refuses it there: no button.
+pub fn azioni_extra(legali: &[Azione], fase: Fase) -> Vec<Azione> {
+    legali
+        .iter()
+        .filter(|a| match a {
+            Azione::Bazzica { .. } => true,
+            Azione::ChePalo { .. } => fase != Fase::Scambio,
+            _ => false,
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests_azioni_extra {
+    use super::*;
+
+    #[test]
+    fn niente_che_palo_durante_lo_scambio() {
+        let legali = [
+            Azione::ChePalo { seat: 0 },
+            Azione::Bazzica {
+                seat: 0,
+                sette: None,
+            },
+            Azione::Attendi { seat: 0 },
+        ];
+        assert_eq!(azioni_extra(&legali, Fase::Gioco).len(), 2);
+        assert_eq!(
+            azioni_extra(&legali, Fase::Scambio),
+            [Azione::Bazzica {
+                seat: 0,
+                sette: None
+            }]
+        );
     }
 }

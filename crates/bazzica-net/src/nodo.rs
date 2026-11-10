@@ -57,10 +57,12 @@ use bazzica_core::bots::{Agent, HeuristicAgent};
 use bazzica_core::game::compagno;
 use bazzica_core::{Azione, Evento, Fase, Mulberry32, Seat};
 
-use crate::protocollo::{Effimero, Messaggio, Regia, Richiesta, Sessione, VERSIONE_PROTOCOLLO};
+use crate::protocollo::{
+    Effimero, Messaggio, Regia, Richiesta, Sessione, TimerInCorso, VERSIONE_PROTOCOLLO,
+};
 use crate::tavolo::{
     Errore, FRASI, IdGiocatore, Impostazioni, Partecipante, Posto, StatoTavolo, Tavolo, TipoTimer,
-    Voce,
+    Voce, normalizza, permesso,
 };
 
 /// How far ahead of ours an epoch may be (a host claim, an entry, a snapshot).
@@ -234,6 +236,8 @@ pub struct Nodo<P> {
     allineamento: Option<Allineamento<P>>,
     piano: Option<(u64, u64, Piano)>,
     timer: Option<(ChiaveTimer, u64)>,
+    /// Follower: the host's timer as of its last entry (kind, seat, local deadline in ms).
+    timer_remoto: Option<(TipoTimer, Option<Seat>, u64)>,
     ultimo_palo: [Option<u64>; 4],
     uscite: Vec<Uscita<P>>,
     /// Protocol version of a peer we had to ignore (it runs another build of the app).
@@ -281,6 +285,7 @@ impl<P: Clone + Ord> Nodo<P> {
             allineamento: None,
             piano: None,
             timer: None,
+            timer_remoto: None,
             ultimo_palo: [None; 4],
             uscite: vec![],
             versione_altrui: None,
@@ -388,9 +393,23 @@ impl<P: Clone + Ord> Nodo<P> {
             && !self.disconnessi().is_empty()
     }
 
-    /// Running turn timer: (kind, seat, deadline in ms). Only known on the host.
+    /// Running turn timer: (kind, seat, deadline in ms on this node's clock). Followers learn it
+    /// from the host's entries.
     pub fn timer(&self) -> Option<(TipoTimer, Option<Seat>, u64)> {
-        self.timer.as_ref().map(|(k, t)| (k.tipo, k.seat, *t))
+        if self.e_host() {
+            self.timer.as_ref().map(|(k, t)| (k.tipo, k.seat, *t))
+        } else {
+            self.timer_remoto
+        }
+    }
+
+    /// The host's running timer, as sent with its entries.
+    fn timer_in_corso(&self) -> Option<TimerInCorso> {
+        self.timer.as_ref().map(|(k, t)| TimerInCorso {
+            tipo: k.tipo,
+            seat: k.seat,
+            resto_ms: t.saturating_sub(self.ora),
+        })
     }
 
     /// When the driver must call [`Nodo::tick`] next.
@@ -702,7 +721,8 @@ impl<P: Clone + Ord> Nodo<P> {
                 n,
                 voce,
                 impronta,
-            } => self.voce_ricevuta(p, regia, epoca, n, voce, impronta),
+                timer,
+            } => self.voce_ricevuta(p, regia, epoca, n, voce, impronta, timer),
             Messaggio::Istantanea {
                 epoca,
                 host,
@@ -810,11 +830,10 @@ impl<P: Clone + Ord> Nodo<P> {
 
     /// Records a participant that said hello, if it is new or changed (host only).
     fn entra(&mut self, io: Partecipante) {
-        if self
-            .tavolo
-            .as_ref()
-            .is_some_and(|t| t.partecipante(&io.id) != Some(&io))
-        {
+        if self.tavolo.as_ref().is_some_and(|t| {
+            let attuale = t.partecipante(&io.id);
+            attuale != Some(&normalizza(&io, attuale, t.partecipanti.len()))
+        }) {
             let _ = self.aggiungi(Voce::Entra(io));
         }
     }
@@ -892,7 +911,17 @@ impl<P: Clone + Ord> Nodo<P> {
         self.ripianifica();
     }
 
-    fn voce_ricevuta(&mut self, p: P, da: Regia, epoca: u64, n: u64, voce: Voce, impronta: String) {
+    #[allow(clippy::too_many_arguments)] // the fields of `Messaggio::Voce`, plus who sent it
+    fn voce_ricevuta(
+        &mut self,
+        p: P,
+        da: Regia,
+        epoca: u64,
+        n: u64,
+        voce: Voce,
+        impronta: String,
+        timer: Option<TimerInCorso>,
+    ) {
         if epoca < self.epoca || (epoca == self.epoca && self.host.as_ref() != Some(&da)) {
             return;
         }
@@ -902,6 +931,7 @@ impl<P: Clone + Ord> Nodo<P> {
         if epoca > self.epoca {
             self.segui(epoca, da);
         }
+        self.timer_remoto = timer.map(|t| (t.tipo, t.seat, self.ora + t.resto_ms));
         let Some(t) = &mut self.tavolo else {
             return self.chiedi(p, 0);
         };
@@ -1086,6 +1116,7 @@ impl<P: Clone + Ord> Nodo<P> {
                     n: da + i as u64,
                     voce: voce.clone(),
                     impronta: impronta.clone(),
+                    timer: self.timer_in_corso(),
                 })
                 .collect();
             for m in voci {
@@ -1266,6 +1297,7 @@ impl<P: Clone + Ord> Nodo<P> {
         }
         self.attesa_istantanea = None;
         self.uscite.push(Uscita::Sincronizzata);
+        self.timer_remoto = None;
         self.controlla();
     }
 
@@ -1302,17 +1334,23 @@ impl<P: Clone + Ord> Nodo<P> {
         let impronta = t.impronta();
         let n = t.n;
         self.log.push((voce.clone(), impronta.clone()));
+        self.uscite.push(Uscita::Applicata {
+            voce: voce.clone(),
+            eventi,
+        });
+        // the timer of the new state travels with the entry
+        self.ripianifica();
+        let timer = self.timer_in_corso();
         self.invia(
             Destinatario::Tutti,
             Messaggio::Voce {
                 epoca: self.epoca,
                 n,
-                voce: voce.clone(),
+                voce,
                 impronta,
+                timer,
             },
         );
-        self.uscite.push(Uscita::Applicata { voce, eventi });
-        self.ripianifica();
         Ok(())
     }
 
@@ -1322,18 +1360,15 @@ impl<P: Clone + Ord> Nodo<P> {
             .tavolo
             .as_ref()
             .ok_or_else(|| Errore("Nessun tavolo".into()))?;
+        let creatore_presente = self.connessi().contains(t.creatore());
+        let host = self.host.as_ref().map(|h| h.id.as_str());
+        permesso(t, id, &r, creatore_presente, host)?;
         let voce = match r {
             Richiesta::Siedi { posto } => Voce::Siedi {
                 id: id.clone(),
                 posto,
             },
-            Richiesta::Alzati { posto } => {
-                let tuo = t.posti_di(id).contains(&posto);
-                if !(tuo || t.e_bot(posto) || id == t.creatore()) {
-                    return Err(Errore("Non puoi liberare questo posto".into()));
-                }
-                Voce::Alzati { posto }
-            }
+            Richiesta::Alzati { posto } => Voce::Alzati { posto },
             Richiesta::Bot { posto, aggiungi } => Voce::Bot { posto, aggiungi },
             Richiesta::Imposta(imp) => Voce::Imposta(imp),
             Richiesta::Avvia => Voce::Avvia {
@@ -1349,12 +1384,9 @@ impl<P: Clone + Ord> Nodo<P> {
                         "Partita in pausa: in attesa di riconnessione".into(),
                     ));
                 }
-                let seat = a
-                    .seat()
-                    .ok_or_else(|| Errore("Azione riservata al sistema".into()))?;
-                if !t.posti_di(id).contains(&seat) {
-                    return Err(Errore("Non controlli questo posto".into()));
-                }
+                let Some(seat) = a.seat() else {
+                    return Err(Errore("Azione riservata al sistema".into()));
+                };
                 if let Azione::ChePalo { .. } = a {
                     if st.fase == Fase::Scambio {
                         return Err(Errore("Durante lo scambio non si può parlare".into()));
@@ -1368,28 +1400,13 @@ impl<P: Clone + Ord> Nodo<P> {
                 Voce::Azione(a)
             }
             Richiesta::Prosegui => {
-                if !t.umani().contains(id) {
-                    return Err(Errore("Non sei seduto al tavolo".into()));
-                }
                 if t.ack.contains(id) {
                     return Ok(());
                 }
                 Voce::Prosegui { id: id.clone() }
             }
-            Richiesta::Termina => {
-                if id != t.creatore() && !t.umani().contains(id) {
-                    return Err(Errore(
-                        "Solo chi è seduto al tavolo può terminare la partita".into(),
-                    ));
-                }
-                Voce::Termina { da: id.clone() }
-            }
+            Richiesta::Termina => Voce::Termina { da: id.clone() },
             Richiesta::Sostituisci { posto } => {
-                if id != t.creatore() && !t.umani().contains(id) {
-                    return Err(Errore(
-                        "Solo chi è seduto al tavolo può sostituire un giocatore".into(),
-                    ));
-                }
                 let assente = match t.posti.get(usize::from(posto)) {
                     Some(Some(Posto::Umano { id: a })) => a.clone(),
                     _ => return Err(Errore("Nessun giocatore da sostituire".into())),
