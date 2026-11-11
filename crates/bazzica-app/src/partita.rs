@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 
 use crate::carte::{Carta, Dorso};
 use crate::guida::{Apertura, Guida, Offerta};
+use crate::premossa::{self, Intento, Prenotazione, Scelte};
 use crate::stanza::avatar_posto;
 use crate::{Ctx, Vista};
 
@@ -42,6 +43,8 @@ pub fn Partita(vista: Vista) -> Element {
     let finita = t.stato == StatoTavolo::Finita;
     let mut finestra = use_signal(|| None::<Finestra>);
     let mut mostrato = use_signal(|| None::<Seat>);
+    // the card being chosen and the plays booked ahead: drawn by both the hand and the table
+    let scelte = use_signal(Scelte::default);
     let mio_turno = st.fase == Fase::Gioco && miei.contains(&st.corrente);
     imposta_titolo(if mio_turno {
         "● Tocca a te · Bazzica"
@@ -86,7 +89,14 @@ pub fn Partita(vista: Vista) -> Element {
                 div { class: "area-sx", Giocatore { vista: vista.clone(), obs: obs.clone(), seat: pos(1) } }
                 div { class: "area-dx", Giocatore { vista: vista.clone(), obs: obs.clone(), seat: pos(3) } }
                 div { class: "area-centro",
-                    Centro { vista: vista.clone(), obs: obs.clone(), apri: move |f| finestra.set(Some(f)) }
+                    Centro {
+                        vista: vista.clone(),
+                        obs: obs.clone(),
+                        st: st.clone(),
+                        scelte,
+                        interattivo: !spettatore && !finita && vista.disconnessi.is_empty(),
+                        apri: move |f| finestra.set(Some(f)),
+                    }
                 }
             }
             Turno { vista: vista.clone(), st: st.clone(), obs: obs.clone(), seat }
@@ -98,6 +108,7 @@ pub fn Partita(vista: Vista) -> Element {
                     st: st.clone(),
                     seat,
                     attivo: vista.disconnessi.is_empty(),
+                    scelte,
                 }
             }
             if da_passare {
@@ -242,32 +253,131 @@ fn UltimaGiocata(g: Option<GiocataMano>) -> Element {
     }
 }
 
+/// What the hand and the table need to know about the card being chosen.
+struct Quadro {
+    /// The choices that still apply to this deal.
+    sc: Scelte,
+    /// The position as the player will find it (with the booked Bazzica already called).
+    previsto: GameState,
+    /// Card picked from the hand during the play.
+    carta: Option<Card>,
+    /// What that card can take.
+    opzioni: Vec<Vec<Card>>,
+    /// Table cards picked so far.
+    presa: Vec<Card>,
+}
+
+fn quadro(st: &GameState, seat: Seat, scelte: &Scelte) -> Quadro {
+    let sc = scelte.valide(st, seat);
+    let previsto = premossa::stato_previsto(st, seat, sc.bazzica);
+    let carta = sc.carta.filter(|_| st.fase == Fase::Gioco);
+    let opzioni = carta
+        .map(|c| premossa::opzioni(&previsto, seat, c))
+        .unwrap_or_default();
+    let presa = premossa::presa_valida(&opzioni, &sc.presa);
+    Quadro {
+        sc,
+        previsto,
+        carta,
+        opzioni,
+        presa,
+    }
+}
+
 #[component]
-fn Centro(vista: Vista, obs: Osservazione, apri: EventHandler<Finestra>) -> Element {
+fn Centro(
+    vista: Vista,
+    obs: Osservazione,
+    st: GameState,
+    scelte: Signal<Scelte>,
+    interattivo: bool,
+    apri: EventHandler<Finestra>,
+) -> Element {
     let ultima = obs.giocate_mano.last().cloned();
     let verso =
         (obs.fase == Fase::Gioco).then(|| LATI[usize::from(relativo(obs.corrente, obs.seat))]);
+    let q = interattivo.then(|| quadro(&st, obs.seat, &scelte.read()));
+    // while a card that can take something is picked, the table shows what it may take
+    let scegliendo = q
+        .as_ref()
+        .is_some_and(|q| q.carta.is_some() && !premossa::solo_posa(&q.opzioni));
+    let prendibili = q
+        .as_ref()
+        .map(|q| premossa::prendibili(&q.opzioni))
+        .unwrap_or_default();
+    let libera = q.as_ref().is_some_and(|q| q.opzioni.len() > 1);
+    let prenotate: Vec<Card> = match q.as_ref().and_then(|q| q.sc.prenotata.as_ref()) {
+        Some(Prenotazione {
+            intento: Intento::Prendi(v),
+            ..
+        }) => v.clone(),
+        Some(Prenotazione {
+            intento: Intento::Sparecchia,
+            ..
+        }) => obs.tavola.clone(),
+        _ => vec![],
+    };
+    let classe_tavola = if scegliendo {
+        "tavola scegliendo"
+    } else {
+        "tavola"
+    };
     rsx! {
-        div { class: "tavola", "data-verso": verso,
+        div { class: "{classe_tavola}", "data-verso": verso,
             if obs.tavola.is_empty() {
                 span { class: "vuota", "tavola vuota" }
             }
             for c in obs.tavola.iter().copied() {
-                Carta { carta: c, classe: "in-tavola" }
-            }
-        }
-        div { class: "dettagli",
-            span { "Mazzo {obs.carte_nel_mazzo} · Prese " }
-            for sq in 0..2usize {
-                if sq == 1 { span { "–" } }
-                span { class: "sq{sq}", "data-prese": "{sq}",
-                    "{obs.prese[sq].n}"
-                    if !obs.prese[sq].scoperte.is_empty() { " ({obs.prese[sq].scoperte.len()} sc.)" }
-                    if obs.credito[sq] > 0 { " +{obs.credito[sq]} cred." }
+                Carta {
+                    key: "{c}",
+                    carta: c,
+                    classe: {
+                        let stato = match &q {
+                            Some(q) if scegliendo && q.presa.contains(&c) => " presa-scelta",
+                            Some(_) if scegliendo && prendibili.contains(&c) => " prendibile",
+                            Some(_) if scegliendo => " spenta",
+                            _ if prenotate.contains(&c) => " prenotata",
+                            _ => "",
+                        };
+                        format!("in-tavola{stato}")
+                    },
+                    onclick: q
+                        .as_ref()
+                        .filter(|_| scegliendo && libera && prendibili.contains(&c))
+                        .map(|q| {
+                            let (sc, opzioni, presa) = (q.sc.clone(), q.opzioni.clone(), q.presa.clone());
+                            let mut scelte = scelte;
+                            EventHandler::new(move |_| {
+                                scelte.set(Scelte {
+                                    presa: premossa::tocca_tavola(&opzioni, &presa, c),
+                                    cambiata: false,
+                                    ..sc.clone()
+                                });
+                            })
+                        }),
                 }
             }
         }
-        if let Some(GiocataMano(s, carta, presa)) = ultima {
+        // while choosing what to take the table needs all the room there is
+        div { class: if scegliendo { "dettagli nascosti" } else { "dettagli" },
+            span { class: "pila mazzo", title: "Carte ancora nel mazzo",
+                span { class: "pila-nome", "Mazzo" }
+                b { "{obs.carte_nel_mazzo}" }
+            }
+            for sq in 0..2usize {
+                span { class: "pila sq{sq}", "data-prese": "{sq}", title: "Prese di {vista.tavolo.impostazioni.squadre[sq]}",
+                    span { class: "pila-nome", "Prese" }
+                    b { "{obs.prese[sq].n}" }
+                    if !obs.prese[sq].scoperte.is_empty() {
+                        span { class: "pila-scope", title: "Scope segnate", "{obs.prese[sq].scoperte.len()} sc." }
+                    }
+                    if obs.credito[sq] > 0 {
+                        span { class: "pila-credito", title: "Scope di Bazzica ancora da segnare", "+{obs.credito[sq]} cred." }
+                    }
+                }
+            }
+        }
+        if let Some(GiocataMano(s, carta, presa)) = ultima.filter(|_| !scegliendo) {
             button { class: "ultima", title: "Tutte le giocate della mano", onclick: move |_| apri.call(Finestra::Giocate),
                 span { class: "sq{s % 2}", "{vista.tavolo.nome_posto(s)}" }
                 " ha giocato {carta.nome()}"
@@ -387,10 +497,33 @@ fn Turno(vista: Vista, st: GameState, obs: Osservazione, seat: Seat) -> Element 
     }
 }
 
+/// A decision taken in the hand: what to remember and, if it is my turn, what to play.
+#[derive(Clone, PartialEq)]
+struct Mossa {
+    azione: Option<Azione>,
+    dopo: Scelte,
+}
+
+fn esegui(ctx: Ctx, mut scelte: Signal<Scelte>, m: Mossa) {
+    scelte.set(m.dopo);
+    if let Some(a) = m.azione {
+        ctx.richiedi(Richiesta::Azione(a));
+    }
+}
+
+/// The game as this device knows it right now (outside a render).
+fn partita_ora(ctx: &Ctx) -> Option<GameState> {
+    let c = ctx.conn.peek().clone()?;
+    let s = c.sessione.borrow();
+    s.nodo().tavolo()?.partita.clone()
+}
+
+/// Pause before a booked play starts, so that the play before it can be seen.
+const PAUSA_PRENOTATA_MS: u64 = 450;
+
 #[component]
-fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
+fn Mano(st: GameState, seat: Seat, attivo: bool, scelte: Signal<Scelte>) -> Element {
     let ctx = use_context::<Ctx>();
-    let mut scelta = use_signal(|| None::<Card>);
     let mut da_confermare = use_signal(|| None::<Azione>);
     let legali = if attivo {
         st.legal_actions(seat)
@@ -398,39 +531,129 @@ fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
         vec![]
     };
     let mano = st.mani[usize::from(seat)].clone();
-    let giocabili = |c: Card| -> Vec<Azione> {
-        legali
-            .iter()
-            .filter(|a| matches!(a, Azione::Gioca { carta, .. } | Azione::Passa { carta, .. } if *carta == c))
-            .cloned()
-            .collect()
+    let q = quadro(&st, seat, &scelte.read());
+    let sc = q.sc.clone();
+    let in_gioco = attivo && st.fase == Fase::Gioco;
+    let mio_turno = in_gioco && st.corrente == seat;
+    // with a Bazzica about to be called by itself, the card waits for it
+    let subito = mio_turno && sc.bazzica.is_none();
+
+    // booked plays: made by themselves when the turn comes, if they still mean the same
+    let automatica = attivo
+        .then(|| premossa::automatica(&st, seat, &sc))
+        .flatten();
+    let ripiego = (attivo && premossa::saltata(&st, seat, &sc)).then(|| Scelte {
+        carta: sc.prenotata.as_ref().map(|p| p.carta),
+        presa: vec![],
+        prenotata: None,
+        cambiata: true,
+        ..sc.clone()
+    });
+    use_effect(use_reactive!(|(automatica, ripiego)| {
+        let mut scelte = scelte;
+        if let Some(nuove) = ripiego {
+            scelte.set(nuove);
+        } else if let Some(a) = automatica {
+            spawn(async move {
+                futures_timer::Delay::new(std::time::Duration::from_millis(PAUSA_PRENOTATA_MS))
+                    .await;
+                // still booked (not cancelled meanwhile) and still the same play
+                let Some(ora) = partita_ora(&ctx) else { return };
+                let valide = scelte.peek().valide(&ora, seat);
+                if premossa::automatica(&ora, seat, &valide).as_ref() != Some(&a) {
+                    return;
+                }
+                let dopo = match a {
+                    Azione::Bazzica { .. } => Scelte {
+                        bazzica: None,
+                        ..valide
+                    },
+                    _ => valide.vuote(),
+                };
+                esegui(
+                    ctx,
+                    scelte,
+                    Mossa {
+                        azione: Some(a),
+                        dopo,
+                    },
+                );
+            });
+        }
+    }));
+
+    // what confirming `carta` on `presa` does: play it now, or book it for my turn
+    let mossa = |carta: Card, presa: &[Card]| -> Mossa {
+        if subito {
+            Mossa {
+                azione: Some(Azione::Gioca {
+                    seat,
+                    carta,
+                    presa: presa.to_vec(),
+                }),
+                dopo: sc.vuote(),
+            }
+        } else {
+            Mossa {
+                azione: None,
+                dopo: Scelte {
+                    carta: None,
+                    presa: vec![],
+                    prenotata: Some(Prenotazione {
+                        carta,
+                        intento: premossa::intento(&q.previsto, seat, carta, presa),
+                    }),
+                    cambiata: false,
+                    ..sc.clone()
+                },
+            }
+        }
     };
-    // Bazzica calls and "che palo": buttons above the hand
-    let altre = azioni_extra(&legali, st.fase);
-    // a card chosen ahead of time stays chosen until it leaves the hand
-    if scelta().is_some_and(|c| !mano.contains(&c)) {
-        scelta.set(None);
+
+    // the exchange: how to pass the picked card
+    let passate: Vec<Azione> = sc
+        .carta
+        .filter(|_| st.fase == Fase::Scambio)
+        .map(|c| {
+            legali
+                .iter()
+                .filter(|a| matches!(a, Azione::Passa { carta, .. } if *carta == c))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Bazzica calls (also bookable before my turn) and "che palo": buttons above the hand
+    let mut altre = azioni_extra(&legali, st.fase);
+    if sc.bazzica.is_some() {
+        altre.retain(|a| !matches!(a, Azione::Bazzica { .. }));
+    } else if in_gioco && !mio_turno {
+        for o in bazzica_core::bazzica::opzioni_bazzica(&mano, &st.regole) {
+            if premossa::bazzica_chiamabile(&st, seat, o.sette) {
+                altre.push(Azione::Bazzica {
+                    seat,
+                    sette: o.sette,
+                });
+            }
+        }
     }
-    if da_confermare().is_some_and(|a| !legali.contains(&a)) {
-        da_confermare.set(None);
-    }
-    let opzioni = scelta().map(giocabili).unwrap_or_default();
-    // cards can be picked during the play even when it is someone else's turn
+    altre.sort_by_key(|a| !matches!(a, Azione::Bazzica { .. }));
+    let conferma_bazzica = da_confermare().filter(|a| {
+        matches!(a, Azione::Bazzica { sette, .. } if in_gioco && sc.bazzica.is_none()
+            && premossa::bazzica_chiamabile(&st, seat, *sette))
+    });
+
     let si_sceglie = attivo
         && match st.fase {
             Fase::Gioco => true,
             Fase::Scambio => legali.iter().any(|a| matches!(a, Azione::Passa { .. })),
             _ => false,
         };
-    let mut fai = move |a: Azione| {
-        scelta.set(None);
-        da_confermare.set(None);
-        ctx.richiedi(Richiesta::Azione(a));
-    };
     let ricevuta = st.scambio_ricevuta[usize::from(seat)];
-    let in_attesa = scelta().is_some() && opzioni.is_empty() && st.fase == Fase::Gioco;
+    let decisa = premossa::decisa(&q.opzioni, &q.presa).cloned();
     // while a choice is open its panel takes the place of the extra buttons
-    let scegliendo = da_confermare().is_some() || !opzioni.is_empty();
+    let scegliendo = conferma_bazzica.is_some() || q.carta.is_some() || !passate.is_empty();
+    let prenotata = sc.prenotata.clone();
     rsx! {
         div { class: "mano",
             if !altre.is_empty() && !scegliendo {
@@ -442,10 +665,9 @@ fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
                                 let a = a.clone();
                                 move |_| {
                                     if matches!(a, Azione::Bazzica { .. }) {
-                                        scelta.set(None);
                                         da_confermare.set(Some(a.clone()));
                                     } else {
-                                        fai(a.clone());
+                                        ctx.richiedi(Richiesta::Azione(a.clone()));
                                     }
                                 }
                             },
@@ -454,36 +676,146 @@ fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
                     }
                 }
             }
-            if let Some(a) = da_confermare() {
+            if let Some(a) = conferma_bazzica {
                 div { class: "opzioni", role: "dialog",
                     p { class: "conferma", b { {etichetta(&st, &a)} } }
-                    p { class: "nota", "Chiamandola giochi a carte scoperte fino alla fine del turno." }
-                    button { class: "opzione", onclick: { let a = a.clone(); move |_| fai(a.clone()) }, "Chiama Bazzica" }
+                    p { class: "nota",
+                        "Chiamandola giochi a carte scoperte fino alla fine del turno."
+                        if !mio_turno { " Non tocca ancora a te: la chiamo io appena arriva il tuo turno." }
+                    }
+                    button {
+                        class: "opzione decisa",
+                        onclick: {
+                            let (a, sc) = (a.clone(), sc.clone());
+                            move |_| {
+                                da_confermare.set(None);
+                                let Azione::Bazzica { sette, .. } = a else { return };
+                                let m = if mio_turno {
+                                    Mossa { azione: Some(a.clone()), dopo: sc.clone() }
+                                } else {
+                                    // the 7 bello and the aces may take something else now
+                                    Mossa {
+                                        azione: None,
+                                        dopo: Scelte { bazzica: Some(sette), presa: vec![], ..sc.clone() },
+                                    }
+                                };
+                                esegui(ctx, scelte, m);
+                            }
+                        },
+                        if mio_turno { "Chiama Bazzica" } else { "Prenota la Bazzica" }
+                    }
                     button { class: "secondario", onclick: move |_| da_confermare.set(None), "Non ancora" }
                 }
-            } else if !opzioni.is_empty() {
+            } else if let Some(carta) = q.carta {
                 div { class: "opzioni", role: "dialog",
+                    if sc.cambiata {
+                        p { class: "nota cambiata", "La tavola è cambiata: la giocata prenotata non vale più. Scegli di nuovo." }
+                    }
                     p { class: "nota",
-                        if opzioni.len() == 1 {
-                            "Tocca di nuovo la carta o il pulsante per confermare."
-                        } else if st.fase == Fase::Scambio {
-                            "Come la passi?"
-                        } else {
-                            "Scegli cosa prendere."
+                        if !subito { "Non tocca ancora a te: prenota la giocata e parte da sola al tuo turno. " }
+                        if q.opzioni.len() > 1 {
+                            "Scegli cosa prendere: tocca le carte in tavola o una combinazione."
+                        } else if subito {
+                            "Tocca di nuovo la carta o il pulsante per giocarla."
                         }
                     }
-                    for a in opzioni.iter().cloned() {
+                    for presa in q.opzioni.iter().cloned() {
+                        OpzionePresa {
+                            st: q.previsto.clone(),
+                            seat,
+                            carta,
+                            presa: presa.clone(),
+                            decisa: decisa.as_ref() == Some(&presa),
+                            subito,
+                            scegli: {
+                                let m = mossa(carta, &presa);
+                                move |_| esegui(ctx, scelte, m.clone())
+                            },
+                        }
+                    }
+                    button {
+                        class: "secondario",
+                        onclick: {
+                            let sc = sc.clone();
+                            let mut scelte = scelte;
+                            move |_| scelte.set(Scelte { carta: None, presa: vec![], cambiata: false, ..sc.clone() })
+                        },
+                        "Cambia carta"
+                    }
+                }
+            } else if !passate.is_empty() {
+                div { class: "opzioni", role: "dialog",
+                    p { class: "nota", "Come la passi?" }
+                    for a in passate.iter().cloned() {
                         button {
                             class: "opzione",
-                            onclick: { let a = a.clone(); move |_| fai(a.clone()) },
+                            onclick: {
+                                let m = Mossa { azione: Some(a.clone()), dopo: sc.vuote() };
+                                move |_| esegui(ctx, scelte, m.clone())
+                            },
                             {etichetta(&st, &a)}
                         }
                     }
-                    button { class: "secondario", onclick: move |_| scelta.set(None), "Cambia carta" }
+                    button {
+                        class: "secondario",
+                        onclick: {
+                            let sc = sc.clone();
+                            let mut scelte = scelte;
+                            move |_| scelte.set(Scelte { carta: None, ..sc.clone() })
+                        },
+                        "Cambia carta"
+                    }
                 }
             }
-            if in_attesa {
-                p { class: "suggerimento", "Carta scelta: quando tocca a te ti chiedo conferma." }
+            if !scegliendo && (prenotata.is_some() || sc.bazzica.is_some()) {
+                div { class: "prenotazioni", role: "status",
+                    if let Some(sette) = sc.bazzica {
+                        div { class: "prenotazione",
+                            span { class: "clessidra", "⏳" }
+                            span { class: "cosa",
+                                "Bazzica prenotata"
+                                if let Some(v) = sette { " (7 bello = {v})" }
+                            }
+                            button {
+                                class: "piccolo secondario",
+                                onclick: {
+                                    let sc = sc.clone();
+                                    let mut scelte = scelte;
+                                    move |_| scelte.set(Scelte { bazzica: None, ..sc.clone() })
+                                },
+                                "Annulla"
+                            }
+                        }
+                    }
+                    if let Some(p) = prenotata.clone() {
+                        div { class: "prenotazione",
+                            span { class: "clessidra", "⏳" }
+                            span { class: "cosa",
+                                "Prenotata: "
+                                Carta { carta: p.carta, classe: "pollice", traccia: false }
+                                match &p.intento {
+                                    Intento::Posa => rsx! { " resta in tavola" },
+                                    Intento::Sparecchia => rsx! { " piglia tutto" },
+                                    Intento::Prendi(v) => rsx! {
+                                        " prende "
+                                        for c in v.iter().copied() {
+                                            Carta { carta: c, classe: "pollice", traccia: false }
+                                        }
+                                    },
+                                }
+                            }
+                            button {
+                                class: "piccolo secondario",
+                                onclick: {
+                                    let sc = sc.clone();
+                                    let mut scelte = scelte;
+                                    move |_| scelte.set(Scelte { prenotata: None, ..sc.clone() })
+                                },
+                                "Annulla"
+                            }
+                        }
+                    }
+                }
             }
             if !scegliendo {
                 Chiacchiere { st: st.clone(), seat }
@@ -491,26 +823,100 @@ fn Mano(st: GameState, seat: Seat, attivo: bool) -> Element {
             div { class: "carte-mano", "data-seat": "{seat}",
                 for c in mano {
                     Carta {
+                        key: "{c}",
                         carta: c,
                         classe: format!(
-                            "in-mano{}{}",
-                            if scelta() == Some(c) { " scelta" } else { "" },
+                            "in-mano{}{}{}",
+                            if sc.carta == Some(c) { " scelta" } else { "" },
+                            if prenotata.as_ref().is_some_and(|p| p.carta == c) { " prenotata" } else { "" },
                             if Some(c) == ricevuta { " ricevuta" } else { "" },
                         ),
                         onclick: si_sceglie.then(|| {
-                            let azioni = giocabili(c);
+                            let sc = sc.clone();
+                            let scelta = sc.carta == Some(c);
+                            let era_prenotata = prenotata.as_ref().is_some_and(|p| p.carta == c);
+                            // a second tap on the picked card confirms what has been decided
+                            let conferma = (scelta && q.carta == Some(c))
+                                .then(|| decisa.as_ref().map(|presa| mossa(c, presa)))
+                                .flatten();
+                            let mut scelte = scelte;
                             EventHandler::new(move |_| {
                                 da_confermare.set(None);
-                                match (scelta() == Some(c), azioni.as_slice()) {
-                                    // second tap on the chosen card confirms its only play
-                                    (true, [unica]) => fai(unica.clone()),
-                                    (true, _) => scelta.set(None),
-                                    (false, _) => scelta.set(Some(c)),
+                                if era_prenotata {
+                                    scelte.set(Scelte { prenotata: None, cambiata: false, ..sc.clone() });
+                                } else if let Some(m) = conferma.clone() {
+                                    esegui(ctx, scelte, m);
+                                } else if scelta {
+                                    scelte.set(Scelte { carta: None, presa: vec![], cambiata: false, ..sc.clone() });
+                                } else {
+                                    scelte.set(Scelte {
+                                        carta: Some(c),
+                                        presa: vec![],
+                                        prenotata: None,
+                                        cambiata: false,
+                                        ..sc.clone()
+                                    });
                                 }
                             })
                         }),
                     }
                 }
+            }
+        }
+    }
+}
+
+/// One thing the picked card can do, drawn with the cards themselves.
+#[component]
+fn OpzionePresa(
+    st: GameState,
+    seat: Seat,
+    carta: Card,
+    presa: Vec<Card>,
+    decisa: bool,
+    subito: bool,
+    scegli: EventHandler<()>,
+) -> Element {
+    let e = premossa::esito(&st, seat, carta, &presa);
+    let tutto = matches!(
+        premossa::intento(&st, seat, carta, &presa),
+        Intento::Sparecchia
+    );
+    let descrizione = etichetta(
+        &st,
+        &Azione::Gioca {
+            seat,
+            carta,
+            presa: presa.clone(),
+        },
+    );
+    let valore = st.valore_effettivo(seat, carta);
+    rsx! {
+        button {
+            class: if decisa { "opzione decisa" } else { "opzione" },
+            title: "{descrizione}",
+            "aria-label": "{descrizione}",
+            onclick: move |_| scegli.call(()),
+            span { class: "opz-carte",
+                Carta { carta, classe: "pollice", traccia: false }
+                if valore != carta.val() { span { class: "opz-vale", "vale {valore}" } }
+                if presa.is_empty() {
+                    span { class: "opz-verbo", "resta in tavola" }
+                } else {
+                    span { class: "opz-verbo", if tutto { "piglia tutto" } else { "prende" } }
+                    for c in presa.iter().copied() {
+                        Carta { carta: c, classe: "pollice", traccia: false }
+                    }
+                    // thumbnails of the same value look alike: spell the cards out
+                    span { class: "opz-nomi", "{nomi(&presa)}" }
+                }
+            }
+            span { class: "opz-esito",
+                if e.scopa { span { class: "premio", "Scopa!" } }
+                if e.piccola { span { class: "premio", "Piccola!" } }
+                if e.grande { span { class: "premio", "Grande!" } }
+                if !e.assi.is_empty() { span { class: "premio", "asso a Scopa" } }
+                span { class: "opz-fai", if subito { "Gioca" } else { "Prenota" } }
             }
         }
     }
@@ -564,18 +970,19 @@ fn etichetta(st: &GameState, a: &Azione) -> String {
             } else {
                 format!("Gioca {} e prendi {}", carta.nome(), nomi(presa))
             };
-            if let Some(ant) = st.anteprima(a) {
-                let e = &ant.esito;
-                for (si, t) in [
-                    (e.scopa, "Scopa!"),
-                    (e.piccola, "Piccola!"),
-                    (e.grande, "Grande!"),
-                    (!e.assi.is_empty(), "asso a Scopa"),
-                ] {
-                    if si {
-                        s.push_str(" · ");
-                        s.push_str(t);
-                    }
+            let Azione::Gioca { seat, .. } = a else {
+                return s;
+            };
+            let e = premossa::esito(st, *seat, *carta, presa);
+            for (si, t) in [
+                (e.scopa, "Scopa!"),
+                (e.piccola, "Piccola!"),
+                (e.grande, "Grande!"),
+                (!e.assi.is_empty(), "asso a Scopa"),
+            ] {
+                if si {
+                    s.push_str(" · ");
+                    s.push_str(t);
                 }
             }
             s

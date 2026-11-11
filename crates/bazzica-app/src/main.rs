@@ -8,6 +8,7 @@ mod fx;
 mod guida;
 mod home;
 mod partita;
+mod premossa;
 mod profilo;
 mod riapertura;
 mod stanza;
